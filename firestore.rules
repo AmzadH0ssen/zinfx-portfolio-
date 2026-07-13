@@ -1,0 +1,2885 @@
+import React, { useState, useEffect } from 'react';
+import { 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut, 
+  onAuthStateChanged,
+  User,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword
+} from 'firebase/auth';
+import { auth, db } from '../lib/firebase';
+import { doc, writeBatch } from 'firebase/firestore';
+import { useData } from './DataContext';
+import { PortfolioItem, Service, Testimonial, SocialLink } from '../types';
+import LucideIcon from './LucideIcon';
+
+const ALLOWED_ADMIN_EMAIL = 'aamzadhossen100@gmail.com';
+
+export default function AdminDashboard() {
+  const { 
+    siteConfig, 
+    portfolioItems, 
+    services, 
+    testimonials, 
+    socialLinks,
+    taxonomies,
+    updateSiteConfig,
+    updateTaxonomies,
+    addPortfolioItem,
+    updatePortfolioItem,
+    deletePortfolioItem,
+    addService,
+    updateService,
+    deleteService,
+    addTestimonial,
+    updateTestimonial,
+    deleteTestimonial,
+    updateSocialLinks
+  } = useData();
+
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>('overview');
+
+  // New robust authentication states
+  const [loginMethod, setLoginMethod] = useState<'google' | 'email'>('email');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [unauthorizedDomainError, setUnauthorizedDomainError] = useState(false);
+  const [showCreateAccountOption, setShowCreateAccountOption] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Authentication logic
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      if (currentUser) {
+        if (currentUser.email === ALLOWED_ADMIN_EMAIL) {
+          setUser(currentUser);
+          setAccessDenied(false);
+        } else {
+          setUser(null);
+          setAccessDenied(true);
+          // Auto signout unauthorized user
+          signOut(auth);
+        }
+      } else {
+        setUser(null);
+      }
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLogin = async () => {
+    setAuthLoading(true);
+    setAccessDenied(false);
+    setAuthError(null);
+    setUnauthorizedDomainError(false);
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error: any) {
+      console.error('Login error:', error);
+      setAuthLoading(false);
+      const errMsg = error?.message || '';
+      const errCode = error?.code || '';
+      if (errCode === 'auth/unauthorized-domain' || errMsg.includes('unauthorized-domain') || errMsg.includes('auth/unauthorized-domain')) {
+        setUnauthorizedDomainError(true);
+        setAuthError('Domain Unauthorized: Firebase has blocked the Google Sign-In popup from this preview URL. Follow the instructions below to authorize it or sign in with Email & Password.');
+      } else {
+        setAuthError(error?.message || 'An error occurred during Google sign-in.');
+      }
+    }
+  };
+
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!password) return;
+    setIsSubmitting(true);
+    setAuthError(null);
+    setShowCreateAccountOption(false);
+
+    try {
+      await signInWithEmailAndPassword(auth, ALLOWED_ADMIN_EMAIL, password);
+    } catch (error: any) {
+      console.error('Email login error:', error);
+      const errCode = error?.code || '';
+      const errMsg = error?.message || '';
+      if (errCode === 'auth/user-not-found' || errMsg.includes('user-not-found') || errCode === 'auth/invalid-credential' || errMsg.includes('invalid-credential')) {
+        // Many times modern SDK returns invalid-credential for both bad password and user-not-found.
+        // We will offer option to try setting/creating password for this email.
+        setShowCreateAccountOption(true);
+        setAuthError('Account not found or password incorrect. If this is your first time setting up Email/Password login, you can set the password you typed as your secure master password.');
+      } else if (errCode === 'auth/wrong-password' || errMsg.includes('wrong-password')) {
+        setAuthError('Incorrect password. Please try again or create a new password if needed.');
+      } else if (errCode === 'auth/operation-not-allowed' || errMsg.includes('operation-not-allowed')) {
+        setAuthError('Email/Password sign-in is disabled in your Firebase console under Authentication > Sign-in method.');
+      } else {
+        setAuthError(error?.message || 'Failed to authenticate via email & password.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCreateEmailAccount = async () => {
+    if (!password) return;
+    setIsSubmitting(true);
+    setAuthError(null);
+    try {
+      await createUserWithEmailAndPassword(auth, ALLOWED_ADMIN_EMAIL, password);
+      setShowCreateAccountOption(false);
+      alert('Email & Password account created successfully! You are now logged in as ' + ALLOWED_ADMIN_EMAIL);
+    } catch (error: any) {
+      console.error('Account creation error:', error);
+      const errCode = error?.code || '';
+      const errMsg = error?.message || '';
+      if (errCode === 'auth/operation-not-allowed' || errMsg.includes('operation-not-allowed')) {
+        setAuthError('Email/Password registration is disabled in your Firebase console. Go to Authentication > Sign-in method, click "Email/Password", enable it, and save.');
+      } else {
+        setAuthError(error?.message || 'Failed to register password. Please verify your Firebase settings.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setUser(null);
+      setAccessDenied(false);
+      setAuthError(null);
+      setUnauthorizedDomainError(false);
+      setShowCreateAccountOption(false);
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  };
+
+  // State for forms and management
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [sortBy, setSortBy] = useState('order');
+
+  // Taxonomy states
+  const [newCatId, setNewCatId] = useState('');
+  const [newCatLabel, setNewCatLabel] = useState('');
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+  const [editingCatLabel, setEditingCatLabel] = useState('');
+
+  const [newPlatName, setNewPlatName] = useState('');
+  const [editingPlatIndex, setEditingPlatIndex] = useState<number | null>(null);
+  const [editingPlatName, setEditingPlatName] = useState('');
+
+  const [newSoftName, setNewSoftName] = useState('');
+  const [editingSoftIndex, setEditingSoftIndex] = useState<number | null>(null);
+  const [editingSoftName, setEditingSoftName] = useState('');
+
+  // Social link form states
+  const [newSocialName, setNewSocialName] = useState('');
+  const [newSocialUrl, setNewSocialUrl] = useState('');
+  const [newSocialIcon, setNewSocialIcon] = useState('Link');
+  const [newSocialBadge, setNewSocialBadge] = useState('');
+
+  // Editing structures
+  const [editingProject, setEditingProject] = useState<Partial<PortfolioItem> | null>(null);
+  const [editingService, setEditingService] = useState<Partial<Service> | null>(null);
+  const [editingTestimonial, setEditingTestimonial] = useState<Partial<Testimonial> | null>(null);
+
+  // Custom detailed states for highly user-friendly portfolio upload form
+  const [projTitle, setProjTitle] = useState('');
+  const [projCategory, setProjCategory] = useState('thumbnails');
+  const [projPlatform, setProjPlatform] = useState('YouTube');
+  const [projSoftware, setProjSoftware] = useState<string[]>([]);
+  const [projDescription, setProjDescription] = useState('');
+  const [projImageUrl, setProjImageUrl] = useState('');
+  const [projIsFeatured, setProjIsFeatured] = useState(false);
+  const [projDisplayOrder, setProjDisplayOrder] = useState('');
+  const [dragActive, setDragActive] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [previewProject, setPreviewProject] = useState<PortfolioItem | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+
+  // Sync form state when editingProject changes
+  useEffect(() => {
+    if (editingProject) {
+      setProjTitle(editingProject.title || '');
+      setProjCategory(editingProject.category || (taxonomies?.categories?.[0]?.id || 'thumbnails'));
+      setProjPlatform(editingProject.platform || editingProject.client || (taxonomies?.platforms?.[0] || 'YouTube'));
+      setProjSoftware(editingProject.softwareUsed || []);
+      setProjDescription(editingProject.description || '');
+      setProjImageUrl(editingProject.imageUrl || '');
+      setProjIsFeatured(editingProject.isFeatured || false);
+      setProjDisplayOrder(editingProject.displayOrder !== undefined ? String(editingProject.displayOrder) : '');
+      setSelectedFile(null);
+    } else {
+      setProjTitle('');
+      setProjCategory(taxonomies?.categories?.[0]?.id || 'thumbnails');
+      setProjPlatform(taxonomies?.platforms?.[0] || 'YouTube');
+      setProjSoftware([]);
+      setProjDescription('');
+      setProjImageUrl('');
+      setProjIsFeatured(false);
+      setProjDisplayOrder('');
+      setSelectedFile(null);
+    }
+  }, [editingProject, taxonomies]);
+
+  // File Upload states
+  const [uploadProgress, setUploadProgress] = useState(false);
+
+  // Handle generic media/image upload to Cloudinary
+  const handleImageUpload = async (file: File, callback: (url: string) => void) => {
+    if (!file) return;
+    setUploadProgress(true);
+    try {
+      const cloudName = siteConfig.cloudinary?.cloudName || (import.meta as any).env?.VITE_CLOUDINARY_CLOUD_NAME || '';
+      const uploadPreset = siteConfig.cloudinary?.uploadPreset || (import.meta as any).env?.VITE_CLOUDINARY_UPLOAD_PRESET || '';
+
+      if (!cloudName || !uploadPreset) {
+        throw new Error('Cloudinary Cloud Name and Upload Preset must be configured in settings (Hero & Global Config) first!');
+      }
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('upload_preset', uploadPreset);
+
+      const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData?.error?.message || `HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const downloadUrl = data.secure_url || data.url;
+      if (!downloadUrl) {
+        throw new Error('Upload response did not contain a secure URL.');
+      }
+
+      callback(downloadUrl);
+      alert('Image uploaded successfully to Cloudinary!');
+    } catch (error: any) {
+      console.error('Cloudinary upload failed:', error);
+      alert('Failed to upload image to Cloudinary. Error: ' + (error.message || error));
+    } finally {
+      setUploadProgress(false);
+    }
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0F0F0F] flex items-center justify-center font-sans">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-[#5DD62C] border-t-transparent rounded-full animate-spin" />
+          <p className="text-zinc-400 font-mono text-sm">Authenticating Admin Access...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (accessDenied) {
+    return (
+      <div className="min-h-screen bg-[#0F0F0F] flex items-center justify-center p-6 font-sans">
+        <div className="max-w-md w-full glass p-8 rounded-2xl border border-red-500/20 text-center flex flex-col items-center">
+          <div className="w-16 h-16 rounded-full bg-red-500/10 flex items-center justify-center text-red-500 mb-6">
+            <LucideIcon name="ShieldAlert" size={32} />
+          </div>
+          <h2 className="text-2xl font-bold text-[#F8F8F8] mb-2 font-heading">Access Denied</h2>
+          <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
+            Only authorized administrator accounts can access this system. Your account is not approved.
+          </p>
+          <div className="flex gap-4">
+            <button
+              onClick={() => { window.location.href = '/'; }}
+              className="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-[#F8F8F8] font-bold text-sm transition-all duration-200"
+            >
+              Go to Website
+            </button>
+            <button
+              onClick={handleLogin}
+              className="px-5 py-2.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-all duration-200"
+            >
+              Try Another Account
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-[#0F0F0F] flex items-center justify-center p-6 font-sans relative overflow-hidden">
+        {/* Ambient background glows */}
+        <div className="absolute top-1/4 left-1/4 w-[350px] h-[350px] bg-[#5DD62C]/5 rounded-full blur-[130px] pointer-events-none" />
+        <div className="absolute bottom-1/4 right-1/4 w-[350px] h-[350px] bg-[#337418]/5 rounded-full blur-[130px] pointer-events-none" />
+
+        <div className="max-w-md w-full relative z-10">
+          <div className="text-center mb-6">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#5DD62C]/10 border border-[#5DD62C]/20 text-xs font-mono font-bold text-[#5DD62C] mb-4">
+              <span className="w-2 h-2 rounded-full bg-[#5DD62C] animate-pulse" />
+              <span>ZINFX CMS v2.0</span>
+            </div>
+            <h1 className="text-4xl font-extrabold text-[#F8F8F8] tracking-tight mb-2 font-heading">
+              Secure <span className="text-[#5DD62C]">Admin Panel</span>
+            </h1>
+            <p className="text-zinc-400 text-sm leading-relaxed max-w-xs mx-auto">
+              Choose your preferred sign-in method to manage ZinFX design assets and portfolio items.
+            </p>
+          </div>
+
+          <div className="glass p-6 sm:p-8 rounded-3xl border border-zinc-800/80 shadow-2xl flex flex-col items-stretch">
+            {/* Login Methods Tab Selector */}
+            <div className="flex bg-[#141414] p-1 rounded-xl mb-6 border border-zinc-850">
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginMethod('google');
+                  setAuthError(null);
+                  setUnauthorizedDomainError(false);
+                  setShowCreateAccountOption(false);
+                }}
+                className={`flex-1 py-2.5 text-xs font-bold font-mono tracking-wide rounded-lg transition-all duration-200 ${
+                  loginMethod === 'google'
+                    ? 'bg-[#5DD62C] text-[#0F0F0F]'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Google Auth
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginMethod('email');
+                  setAuthError(null);
+                  setUnauthorizedDomainError(false);
+                  setShowCreateAccountOption(false);
+                }}
+                className={`flex-1 py-2.5 text-xs font-bold font-mono tracking-wide rounded-lg transition-all duration-200 ${
+                  loginMethod === 'email'
+                    ? 'bg-[#5DD62C] text-[#0F0F0F]'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Email & Password
+              </button>
+            </div>
+
+            {authError && (
+              <div className="mb-6 p-4 rounded-xl bg-red-950/40 border border-red-500/20 text-left">
+                <div className="flex gap-2.5 items-start">
+                  <LucideIcon name="ShieldAlert" className="text-red-500 shrink-0 mt-0.5" size={18} />
+                  <div className="flex-1">
+                    <h4 className="text-sm font-bold text-red-400 font-heading">Authentication Notice</h4>
+                    <p className="text-xs text-zinc-300 mt-1 leading-relaxed">{authError}</p>
+                  </div>
+                </div>
+
+                {/* If it is an unauthorized domain error, show step by step */}
+                {unauthorizedDomainError && (
+                  <div className="mt-4 pt-4 border-t border-red-500/10 text-xs text-zinc-400 flex flex-col gap-3">
+                    <p className="font-semibold text-zinc-300">How to authorize Google login in Firebase Console:</p>
+                    <ol className="list-decimal pl-4 space-y-1 text-zinc-400">
+                      <li>Go to the <a href="https://console.firebase.google.com" target="_blank" rel="noopener noreferrer" className="text-[#5DD62C] underline">Firebase Console</a></li>
+                      <li>Select your project <strong className="text-zinc-300">zinfxport01</strong></li>
+                      <li>Go to <strong className="text-zinc-300">Authentication</strong> &gt; <strong className="text-zinc-300">Settings</strong> &gt; <strong className="text-zinc-300">Authorized domains</strong></li>
+                      <li>Add these authorized domains:</li>
+                    </ol>
+                    <div className="bg-[#0A0A0A] p-2.5 rounded border border-zinc-850 font-mono text-[10px] text-zinc-300 space-y-1 select-all break-all">
+                      <div>ais-dev-f2z7y4luxxfpvvbdlxiao2-922249629892.asia-southeast1.run.app</div>
+                      <div>ais-pre-f2z7y4luxxfpvvbdlxiao2-922249629892.asia-southeast1.run.app</div>
+                      <div>localhost</div>
+                    </div>
+                    <p className="text-[10px] text-zinc-500 italic">
+                      Tip: Alternatively, use the <strong>Email & Password</strong> tab above for an immediate workaround that doesn't require whitelisting!
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {loginMethod === 'google' ? (
+              <div className="flex flex-col items-center">
+                <div className="w-14 h-14 rounded-2xl bg-[#5DD62C]/10 flex items-center justify-center text-[#5DD62C] mb-6">
+                  <LucideIcon name="Lock" size={24} />
+                </div>
+                
+                <button
+                  onClick={handleLogin}
+                  className="w-full flex items-center justify-center gap-3 px-6 py-4 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-all duration-300 shadow-lg shadow-[#5DD62C]/10 hover:scale-[1.01]"
+                  id="admin-login-btn"
+                >
+                  <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24">
+                    <path
+                      fill="currentColor"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="currentColor"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="currentColor"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                    />
+                    <path
+                      fill="currentColor"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                    />
+                  </svg>
+                  <span>Sign in with Google</span>
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleEmailLogin} className="flex flex-col gap-4 text-left">
+                {/* Email Field (Static Admin Email) */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                    Admin Email
+                  </label>
+                  <input
+                    type="email"
+                    value={ALLOWED_ADMIN_EMAIL}
+                    disabled
+                    className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-zinc-500 text-sm outline-none cursor-not-allowed"
+                  />
+                </div>
+
+                {/* Password Field */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                    Password / Master Passcode
+                  </label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter admin password"
+                    required
+                    className="px-4 py-3 rounded-xl bg-[#0F0F0F]/40 border border-zinc-800 text-[#F8F8F8] text-sm focus:border-[#5DD62C] focus:ring-1 focus:ring-[#5DD62C] outline-none transition-all duration-300"
+                  />
+                </div>
+
+                {/* Submit / Login Button */}
+                {!showCreateAccountOption ? (
+                  <button
+                    type="submit"
+                    disabled={isSubmitting || !password}
+                    className="mt-2 w-full py-3.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm shadow-md hover:shadow-[#5DD62C]/10 transition-all duration-300 flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isSubmitting ? (
+                      <div className="w-5 h-5 border-2 border-[#0F0F0F] border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <span>Log In with Password</span>
+                        <LucideIcon name="LogIn" size={16} />
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  <div className="flex flex-col gap-2 mt-2">
+                    <button
+                      type="button"
+                      onClick={handleCreateEmailAccount}
+                      disabled={isSubmitting || !password}
+                      className="w-full py-3.5 rounded-xl bg-[#9FF075] hover:bg-[#8DE065] text-[#0F0F0F] font-bold text-sm shadow-md transition-all duration-300 flex items-center justify-center gap-2"
+                    >
+                      {isSubmitting ? (
+                        <div className="w-5 h-5 border-2 border-[#0F0F0F] border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <>
+                          <span>Set This Password as Master</span>
+                          <LucideIcon name="UserPlus" size={16} />
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCreateAccountOption(false);
+                        setAuthError(null);
+                      }}
+                      className="text-xs text-zinc-500 hover:text-zinc-400 font-semibold font-mono self-center mt-1"
+                    >
+                      Cancel and Retry Login
+                    </button>
+                  </div>
+                )}
+              </form>
+            )}
+
+            <button
+              onClick={() => { window.location.href = '/'; }}
+              className="mt-6 text-xs font-mono text-zinc-500 hover:text-zinc-300 transition-colors self-center"
+            >
+              ← Back to Live Portfolio
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Reordering controls and state helpers
+  const isReorderingEnabled = sortBy === 'order' && searchQuery === '' && filterCategory === 'all';
+
+  const handleReorder = async (dragIndex: number, hoverIndex: number) => {
+    if (dragIndex === hoverIndex) return;
+    
+    const items = [...filteredPortfolio];
+    const draggedItem = items[dragIndex];
+    
+    items.splice(dragIndex, 1);
+    items.splice(hoverIndex, 0, draggedItem);
+    
+    // Check how many items are originally featured in our filtered list
+    const originalFeaturedCount = filteredPortfolio.filter(x => x.isFeatured).length;
+    
+    const updatedItems = items.map((item, idx) => {
+      const shouldBeFeatured = idx < originalFeaturedCount;
+      return {
+        ...item,
+        isFeatured: shouldBeFeatured,
+        displayOrder: idx + 1
+      };
+    });
+    
+    try {
+      const batch = writeBatch(db);
+      updatedItems.forEach((item) => {
+        const docRef = doc(db, 'portfolio', item.id);
+        batch.update(docRef, {
+          displayOrder: item.displayOrder,
+          isFeatured: item.isFeatured
+        });
+      });
+      await batch.commit();
+    } catch (err: any) {
+      console.error("Failed to update project orders:", err);
+      alert("Error updating order: " + err.message);
+    }
+  };
+
+  const handleMoveProject = async (index: number, direction: 'up' | 'down') => {
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= filteredPortfolio.length) return;
+    await handleReorder(index, targetIndex);
+  };
+
+  const handleToggleFeatured = async (item: PortfolioItem) => {
+    try {
+      const newIsFeatured = !item.isFeatured;
+      
+      const updatedList = portfolioItems.map(x => {
+        if (x.id === item.id) {
+          return { ...x, isFeatured: newIsFeatured };
+        }
+        return x;
+      });
+      
+      // Sort updatedList by: featured first, then displayOrder ascending
+      updatedList.sort((a, b) => {
+        const aFeatured = !!a.isFeatured;
+        const bFeatured = !!b.isFeatured;
+        if (aFeatured !== bFeatured) {
+          return aFeatured ? -1 : 1;
+        }
+        const aOrder = a.displayOrder !== undefined ? a.displayOrder : 999999;
+        const bOrder = b.displayOrder !== undefined ? b.displayOrder : 999999;
+        if (aOrder !== bOrder) {
+          return aOrder - bOrder;
+        }
+        return a.id.localeCompare(b.id);
+      });
+      
+      const batch = writeBatch(db);
+      updatedList.forEach((x, idx) => {
+        const xRef = doc(db, 'portfolio', x.id);
+        batch.update(xRef, {
+          isFeatured: x.isFeatured,
+          displayOrder: idx + 1
+        });
+      });
+      await batch.commit();
+      setSuccessMessage(newIsFeatured ? "Project pinned as Featured!" : "Project removed from Featured.");
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: any) {
+      console.error("Failed to toggle featured status:", err);
+      alert("Error toggling featured: " + err.message);
+    }
+  };
+
+  // Filter and Search Portfolio Items
+  const filteredPortfolio = portfolioItems
+    .filter(item => {
+      const title = item.title || '';
+      const clientName = (item as any).clientName || item.client || '';
+      const platform = item.platform || '';
+      const description = item.description || '';
+      const query = searchQuery || '';
+
+      const matchQuery = title.toLowerCase().includes(query.toLowerCase()) || 
+                         clientName.toLowerCase().includes(query.toLowerCase()) ||
+                         platform.toLowerCase().includes(query.toLowerCase()) ||
+                         description.toLowerCase().includes(query.toLowerCase());
+      const matchCategory = filterCategory === 'all' || item.category === filterCategory;
+      return matchQuery && matchCategory;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'order') {
+        const aFeatured = !!a.isFeatured;
+        const bFeatured = !!b.isFeatured;
+        if (aFeatured !== bFeatured) {
+          return aFeatured ? -1 : 1;
+        }
+        const aOrder = a.displayOrder !== undefined ? a.displayOrder : 999999;
+        const bOrder = b.displayOrder !== undefined ? b.displayOrder : 999999;
+        if (aOrder !== bOrder) {
+          return aOrder - bOrder;
+        }
+        return (a.id || '').localeCompare(b.id || '');
+      }
+
+      const aId = String(a.id || '');
+      const bId = String(b.id || '');
+      const aTitle = String(a.title || '');
+      const bTitle = String(b.title || '');
+      if (sortBy === 'newest') return bId.localeCompare(aId);
+      if (sortBy === 'oldest') return aId.localeCompare(bId);
+      return aTitle.localeCompare(bTitle);
+    });
+
+  return (
+    <div className="min-h-screen bg-[#0F0F0F] text-[#F8F8F8] flex font-sans">
+      
+      {/* Sidebar Navigation */}
+      <aside className="w-64 bg-[#141414] border-r border-zinc-800/80 flex flex-col justify-between shrink-0">
+        <div>
+          {/* Brand Logo Area */}
+          <div className="p-6 border-b border-zinc-900 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#5DD62C] to-[#337418] flex items-center justify-center font-black text-[#0F0F0F] tracking-tighter">
+              ZF
+            </div>
+            <div>
+              <h2 className="text-sm font-black text-[#F8F8F8] uppercase tracking-wide">ZinFX</h2>
+              <span className="text-[10px] font-mono text-zinc-500 uppercase">Administrator</span>
+            </div>
+          </div>
+
+          {/* Nav Items */}
+          <nav className="p-4 flex flex-col gap-1">
+            {[
+              { id: 'overview', label: 'Dashboard Overview', icon: 'LayoutDashboard' },
+              { id: 'hero', label: 'Hero & Global Config', icon: 'Flame' },
+              { id: 'about', label: 'About Page', icon: 'User' },
+              { id: 'portfolio', label: 'Portfolio Works', icon: 'Image' },
+              { id: 'taxonomies', label: 'Taxonomy Manager', icon: 'Settings2' },
+              { id: 'services', label: 'My Services', icon: 'Sparkles' },
+              { id: 'testimonials', label: 'Testimonials', icon: 'MessageSquare' },
+              { id: 'contact', label: 'Contact & Socials', icon: 'Share2' },
+            ].map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => {
+                    setActiveTab(tab.id);
+                    setEditingProject(null);
+                    setEditingService(null);
+                    setEditingTestimonial(null);
+                  }}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                    isActive 
+                      ? 'bg-[#5DD62C]/10 text-[#5DD62C] border border-[#5DD62C]/10' 
+                      : 'text-zinc-400 hover:text-[#F8F8F8] hover:bg-zinc-900/50'
+                  }`}
+                  id={`admin-tab-${tab.id}`}
+                >
+                  <LucideIcon name={tab.icon} size={18} />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+
+        {/* User profile & Logout */}
+        <div className="p-4 border-t border-zinc-900 flex flex-col gap-3">
+          <div className="flex items-center gap-3 px-2">
+            <img 
+              src={user.photoURL || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100"} 
+              alt="Admin Avatar" 
+              className="w-9 h-9 rounded-full border border-zinc-800"
+              referrerPolicy="no-referrer"
+            />
+            <div className="overflow-hidden">
+              <h4 className="text-xs font-bold text-[#F8F8F8] truncate leading-tight">{user.displayName}</h4>
+              <span className="text-[10px] font-mono text-zinc-500 truncate block">{user.email}</span>
+            </div>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800/80 text-xs font-bold text-zinc-300 hover:text-[#F8F8F8] transition-colors"
+          >
+            <LucideIcon name="LogOut" size={14} />
+            <span>Sign Out Session</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Panel Area */}
+      <main className="flex-1 min-w-0 bg-[#0F0F0F] p-8 md:p-12 overflow-y-auto">
+        <header className="flex justify-between items-center mb-10 pb-6 border-b border-zinc-900">
+          <div>
+            <span className="text-xs font-mono text-[#5DD62C] tracking-widest uppercase">ZinFX Custom CMS</span>
+            <h1 className="text-2xl font-black text-[#F8F8F8] tracking-tight uppercase">
+              {(activeTab || '').replace('-', ' ')}
+            </h1>
+          </div>
+          <button
+            onClick={() => { window.location.href = '/'; }}
+            className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800/80 text-xs font-bold text-zinc-300 hover:text-[#F8F8F8] flex items-center gap-1.5 transition-colors"
+          >
+            <LucideIcon name="Eye" size={14} />
+            <span>View Live Site</span>
+          </button>
+        </header>
+
+        {/* =========================================================================
+            TAB: OVERVIEW
+            ========================================================================= */}
+        {activeTab === 'overview' && (
+          <div className="flex flex-col gap-10">
+            {/* Quick stats grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              {[
+                { label: 'Total Portfolio Projects', value: portfolioItems.length, icon: 'Image', color: 'text-blue-500' },
+                { label: 'Core Services Listed', value: services.length, icon: 'Sparkles', color: 'text-[#5DD62C]' },
+                { label: 'Client Testimonials', value: testimonials.length, icon: 'MessageSquare', color: 'text-purple-500' },
+                { label: 'Connected Channels', value: socialLinks.length, icon: 'Share2', color: 'text-amber-500' },
+              ].map((stat, idx) => (
+                <div key={idx} className="glass p-6 rounded-2xl flex items-center justify-between">
+                  <div>
+                    <span className="text-[11px] font-mono font-semibold tracking-wider text-zinc-500 uppercase block mb-1">
+                      {stat.label}
+                    </span>
+                    <span className="text-3xl font-black text-[#F8F8F8] tracking-tight">
+                      {stat.value}
+                    </span>
+                  </div>
+                  <div className={`w-12 h-12 rounded-xl bg-zinc-900/50 flex items-center justify-center ${stat.color}`}>
+                    <LucideIcon name={stat.icon} size={22} />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Quick introduction card */}
+            <div className="glass p-8 rounded-3xl border border-zinc-800/80 flex flex-col md:flex-row items-center justify-between gap-6">
+              <div className="max-w-xl text-left">
+                <h3 className="text-lg font-bold text-[#F8F8F8] mb-2 font-heading">
+                  Welcome to your Content Management System
+                </h3>
+                <p className="text-zinc-400 text-sm leading-relaxed font-sans">
+                  All changes made here are saved directly to Firestore and Storage. Normal visitors will instantly see your updated YouTube thumbnails, pricing structures, and contact parameters.
+                </p>
+              </div>
+              <button 
+                onClick={() => setActiveTab('portfolio')}
+                className="px-6 py-3 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-colors flex items-center gap-2 shrink-0"
+              >
+                <span>Add Portfolio Project</span>
+                <LucideIcon name="Plus" size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: HERO & GLOBAL CONFIG
+            ========================================================================= */}
+        {activeTab === 'hero' && (
+          <div className="glass p-8 rounded-3xl border border-zinc-800/80 text-left max-w-4xl">
+            <h3 className="text-lg font-bold text-[#F8F8F8] mb-6 font-heading border-b border-zinc-900 pb-3">
+              Hero Section Copy & Config
+            </h3>
+            
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const fd = new FormData(e.currentTarget);
+              updateSiteConfig({
+                ...siteConfig,
+                hero: {
+                  ...siteConfig.hero,
+                  badge: fd.get('heroBadge') as string,
+                  titleLine1: fd.get('heroTitleLine1') as string,
+                  titleLine2: fd.get('heroTitleLine2') as string,
+                  subtitle: fd.get('heroSubtitle') as string,
+                  designerStatus: fd.get('heroDesignerStatus') as string,
+                  ctaText: fd.get('heroCtaText') as string,
+                },
+                logo: {
+                  ...siteConfig.logo,
+                  letter1: fd.get('logoLetter1') as string,
+                  letter2: fd.get('logoLetter2') as string,
+                  text: fd.get('logoText') as string,
+                },
+                seo: {
+                  ...siteConfig.seo,
+                  title: fd.get('seoTitle') as string,
+                  description: fd.get('seoDesc') as string,
+                },
+                cloudinary: {
+                  cloudName: fd.get('cloudinaryCloudName') as string || '',
+                  uploadPreset: fd.get('cloudinaryUploadPreset') as string || '',
+                }
+              });
+              alert('Hero & Global Configurations updated in Firestore!');
+            }} className="flex flex-col gap-6">
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Logo Initial 1</label>
+                  <input name="logoLetter1" defaultValue={siteConfig.logo?.letter1} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Logo Initial 2</label>
+                  <input name="logoLetter2" defaultValue={siteConfig.logo?.letter2} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Logo Subtitle/Text</label>
+                <input name="logoText" defaultValue={siteConfig.logo?.text} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+              </div>
+
+              <div className="border-t border-zinc-900 pt-6">
+                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Hero Floating Badge</label>
+                <input name="heroBadge" defaultValue={siteConfig.hero?.badge} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Hero Title Line 1</label>
+                  <input name="heroTitleLine1" defaultValue={siteConfig.hero?.titleLine1} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Hero Title Line 2 (Colored)</label>
+                  <input name="heroTitleLine2" defaultValue={siteConfig.hero?.titleLine2} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Hero Subtitle Text</label>
+                <textarea name="heroSubtitle" defaultValue={siteConfig.hero?.subtitle} rows={3} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Designer Subheading/Status</label>
+                  <input name="heroDesignerStatus" defaultValue={siteConfig.hero?.designerStatus} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Hero CTA Button Text</label>
+                  <input name="heroCtaText" defaultValue={siteConfig.hero?.ctaText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+              </div>
+
+              <div className="border-t border-zinc-900 pt-6">
+                <h4 className="text-sm font-bold text-zinc-300 mb-4 flex items-center gap-2">
+                  <LucideIcon name="Cloud" size={16} className="text-[#5DD62C]" />
+                  <span>Cloudinary Media Settings</span>
+                </h4>
+                <p className="text-xs text-zinc-400 mb-4">
+                  Set up your Cloudinary credentials for handling portfolio image uploads securely on the frontend without exposing API secrets.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Cloudinary Cloud Name</label>
+                    <input name="cloudinaryCloudName" defaultValue={siteConfig.cloudinary?.cloudName || ""} placeholder="e.g. dxyz12345" className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Unsigned Upload Preset</label>
+                    <input name="cloudinaryUploadPreset" defaultValue={siteConfig.cloudinary?.uploadPreset || ""} placeholder="e.g. portfolio_preset" className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-zinc-900 pt-6">
+                <h4 className="text-sm font-bold text-zinc-300 mb-4">SEO Metadata Config</h4>
+                <div className="grid grid-cols-1 gap-4">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">SEO Title Tag</label>
+                    <input name="seoTitle" defaultValue={siteConfig.seo?.title} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">SEO Meta Description</label>
+                    <textarea name="seoDesc" defaultValue={siteConfig.seo?.description} rows={2} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+              </div>
+
+              <button type="submit" className="px-6 py-3.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-colors mt-4 self-start">
+                Save Global Config
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: ABOUT PAGE
+            ========================================================================= */}
+        {activeTab === 'about' && (
+          <div className="glass p-8 rounded-3xl border border-zinc-800/80 text-left max-w-4xl">
+            <h3 className="text-lg font-bold text-[#F8F8F8] mb-6 font-heading border-b border-zinc-900 pb-3">
+              About Section Content
+            </h3>
+            
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const fd = new FormData(e.currentTarget);
+              updateSiteConfig({
+                ...siteConfig,
+                about: {
+                  ...siteConfig.about,
+                  badgeText: fd.get('aboutBadge') as string,
+                  titleLine1: fd.get('aboutTitleLine1') as string,
+                  titleLine2: fd.get('aboutTitleLine2') as string,
+                  paragraph1: fd.get('aboutPara1') as string,
+                  paragraph2: fd.get('aboutPara2') as string,
+                  portraitUrl: fd.get('portraitUrl') as string,
+                  experienceValue: fd.get('expValue') as string,
+                  experienceLabel: fd.get('expLabel') as string,
+                  craftQualityValue: fd.get('craftValue') as string,
+                  craftQualityLabel: fd.get('craftLabel') as string,
+                }
+              });
+              alert('About Section saved in Firestore!');
+            }} className="flex flex-col gap-6">
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Section Badge</label>
+                  <input name="aboutBadge" defaultValue={siteConfig.about?.badgeText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Portrait Image URL</label>
+                  <div className="flex gap-2">
+                    <input id="portraitUrlInput" name="portraitUrl" defaultValue={siteConfig.about?.portraitUrl} className="flex-1 bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                    <label className="px-4 py-3 bg-zinc-800 hover:bg-zinc-700 rounded-xl text-xs font-bold text-zinc-300 cursor-pointer transition-colors shrink-0 flex items-center justify-center">
+                      <LucideIcon name="Upload" size={14} className="mr-1" />
+                      <span>Upload</span>
+                      <input type="file" accept="image/*" className="hidden" onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          handleImageUpload(file, (url) => {
+                            const inp = document.getElementById('portraitUrlInput') as HTMLInputElement;
+                            if (inp) inp.value = url;
+                          });
+                        }
+                      }} />
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Heading Line 1</label>
+                  <input name="aboutTitleLine1" defaultValue={siteConfig.about?.titleLine1} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Heading Line 2 (Colored)</label>
+                  <input name="aboutTitleLine2" defaultValue={siteConfig.about?.titleLine2} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Narrative Paragraph 1</label>
+                <textarea name="aboutPara1" defaultValue={siteConfig.about?.paragraph1} rows={4} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Narrative Paragraph 2</label>
+                <textarea name="aboutPara2" defaultValue={siteConfig.about?.paragraph2} rows={4} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+              </div>
+
+              <div className="border-t border-zinc-900 pt-6">
+                <h4 className="text-sm font-bold text-zinc-300 mb-4">Floating Badge Settings</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Experience Value (e.g. 5+)</label>
+                    <input name="expValue" defaultValue={siteConfig.about?.experienceValue} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Experience Label (e.g. Years Active)</label>
+                    <input name="expLabel" defaultValue={siteConfig.about?.experienceLabel} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Craft Quality Value (e.g. Pixel Perfect)</label>
+                    <input name="craftValue" defaultValue={siteConfig.about?.craftQualityValue} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Craft Quality Label (e.g. CRAFT QUALITY)</label>
+                    <input name="craftLabel" defaultValue={siteConfig.about?.craftQualityLabel} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+              </div>
+
+              <button type="submit" className="px-6 py-3.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-colors mt-4 self-start">
+                Save About Content
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: PORTFOLIO WORKS
+            ========================================================================= */}
+        {activeTab === 'portfolio' && (
+          <div className="flex flex-col gap-10">
+            {/* Success flash message banner */}
+            {successMessage && (
+              <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/20 text-emerald-400 font-sans text-sm flex items-center gap-3 animate-fade-in self-start w-full max-w-xl shadow-lg shadow-emerald-950/20 animate-in fade-in duration-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="font-semibold">{successMessage}</span>
+              </div>
+            )}
+
+            {/* Error flash message banner */}
+            {errorMessage && (
+              <div className="p-4 rounded-xl bg-red-950/40 border border-red-500/20 text-red-400 font-sans text-sm flex items-center gap-3 animate-fade-in self-start w-full max-w-xl shadow-lg shadow-red-950/20 animate-in fade-in duration-300">
+                <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                <span className="font-semibold">{errorMessage}</span>
+              </div>
+            )}
+
+            {/* Custom Portfolio Title Section Modifier */}
+            <div className="glass p-6 rounded-2xl border border-zinc-800/50 max-w-4xl text-left">
+              <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-4">Portfolio Section Titles</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Badge Text</label>
+                  <input id="portBadgeInput" defaultValue={siteConfig.portfolioTitle?.badgeText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Title Text</label>
+                  <input id="portTitleInput" defaultValue={siteConfig.portfolioTitle?.titleText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => {
+                  const b = (document.getElementById('portBadgeInput') as HTMLInputElement)?.value;
+                  const t = (document.getElementById('portTitleInput') as HTMLInputElement)?.value;
+                  updateSiteConfig({
+                    ...siteConfig,
+                    portfolioTitle: { badgeText: b, titleText: t }
+                  });
+                  alert('Portfolio section headers updated!');
+                }}
+                className="mt-3 px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[#F8F8F8] font-bold text-xs transition-colors"
+              >
+                Update Section Headers
+              </button>
+            </div>
+
+            {/* DIRECT SIMPLE PORTFOLIO UPLOAD & EDIT FORM */}
+            <div id="portfolio-form-container" className="glass p-8 rounded-3xl border border-zinc-800/80 shadow-2xl text-left max-w-4xl">
+              <div className="flex items-center gap-3 mb-6 pb-4 border-b border-zinc-900">
+                <div className="w-10 h-10 rounded-xl bg-[#5DD62C]/10 flex items-center justify-center text-[#5DD62C]">
+                  <LucideIcon name={editingProject?.id ? "Edit3" : "UploadCloud"} size={20} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-[#F8F8F8] tracking-tight uppercase">
+                    {editingProject?.id ? 'Edit Portfolio Project' : 'Publish a New Portfolio Project'}
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {editingProject?.id ? 'Modify current project settings. Changes reflect immediately.' : 'Upload an image and fill out details to instantly showcase your work on the portfolio.'}
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (!projTitle) {
+                  alert("Project Title is required!");
+                  return;
+                }
+                if (projSoftware.length === 0) {
+                  alert("Please select at least one software application used.");
+                  return;
+                }
+                if (!projImageUrl) {
+                  alert("Project image is required! Please drag & drop or select an image file.");
+                  return;
+                }
+
+                setUploadProgress(true);
+                setErrorMessage(null);
+                setSuccessMessage(null);
+                try {
+                  let finalImageUrl = projImageUrl;
+                  
+                  // If a local file is selected, upload it to Cloudinary on submit
+                  if (selectedFile) {
+                    try {
+                      const cloudName = siteConfig.cloudinary?.cloudName || (import.meta as any).env?.VITE_CLOUDINARY_CLOUD_NAME || '';
+                      const uploadPreset = siteConfig.cloudinary?.uploadPreset || (import.meta as any).env?.VITE_CLOUDINARY_UPLOAD_PRESET || '';
+
+                      if (!cloudName || !uploadPreset) {
+                        throw new Error('Cloudinary Cloud Name and Upload Preset must be configured in settings (Hero & Global Config) first!');
+                      }
+
+                      const formData = new FormData();
+                      formData.append('file', selectedFile);
+                      formData.append('upload_preset', uploadPreset);
+
+                      const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+                        method: 'POST',
+                        body: formData,
+                      });
+
+                      if (!response.ok) {
+                        const errData = await response.json().catch(() => ({}));
+                        throw new Error(errData?.error?.message || `HTTP error! status: ${response.status}`);
+                      }
+
+                      const data = await response.json();
+                      const downloadUrl = data.secure_url || data.url;
+                      if (!downloadUrl) {
+                        throw new Error('Upload response did not contain a secure URL.');
+                      }
+                      finalImageUrl = downloadUrl;
+                    } catch (uploadErr: any) {
+                      console.error('Cloudinary upload failed:', uploadErr);
+                      throw new Error('Cloudinary upload failed: ' + (uploadErr.message || uploadErr));
+                    }
+                  }
+
+                  const isEditing = !!(editingProject && editingProject.id);
+                  const id = isEditing ? (editingProject!.id!) : `port_${Date.now()}`;
+                  
+                  let orderNum: number;
+                  if (projDisplayOrder !== '') {
+                    orderNum = Number(projDisplayOrder);
+                  } else if (isEditing && editingProject.displayOrder !== undefined) {
+                    orderNum = editingProject.displayOrder;
+                  } else {
+                    const maxOrder = portfolioItems.reduce((max, item) => (item.displayOrder !== undefined && item.displayOrder > max ? item.displayOrder : max), 0);
+                    orderNum = maxOrder + 1;
+                  }
+
+                  const itemData: PortfolioItem = {
+                    id,
+                    title: projTitle,
+                    category: projCategory,
+                    imageUrl: finalImageUrl,
+                    description: projDescription,
+                    aspectRatio: (editingProject?.aspectRatio as any) || '16:9',
+                    client: projPlatform, // backward compatibility
+                    platform: projPlatform,
+                    softwareUsed: projSoftware,
+                    isFeatured: projIsFeatured,
+                    displayOrder: orderNum,
+                  };
+
+                  if (isEditing) {
+                    await updatePortfolioItem(id, itemData);
+                    setSuccessMessage("Project updated successfully!");
+                  } else {
+                    await addPortfolioItem(itemData);
+                    setSuccessMessage("Project published successfully!");
+                  }
+
+                  // Clear form and cancel edit
+                  setEditingProject(null);
+                  setProjTitle('');
+                  setProjCategory('thumbnails');
+                  setProjPlatform('YouTube');
+                  setProjSoftware([]);
+                  setProjDescription('');
+                  setProjImageUrl('');
+                  setProjIsFeatured(false);
+                  setProjDisplayOrder('');
+                  setSelectedFile(null);
+
+                  setTimeout(() => {
+                    setSuccessMessage(null);
+                  }, 5000);
+
+                } catch (error: any) {
+                  console.error('Publish error:', error);
+                  setErrorMessage('Failed to save project. Error: ' + (error.message || error));
+                  setTimeout(() => {
+                    setErrorMessage(null);
+                  }, 8000);
+                } finally {
+                  setUploadProgress(false);
+                }
+              }} className="flex flex-col gap-6">
+
+                {/* Form Inputs Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  
+                  {/* Title */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                      Project Title <span className="text-[#5DD62C]">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Fortnite Battle Royale Thumbnail"
+                      value={projTitle}
+                      onChange={(e) => setProjTitle(e.target.value)}
+                      required
+                      className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-[#F8F8F8] text-xs focus:border-[#5DD62C] focus:ring-1 focus:ring-[#5DD62C] outline-none transition-all duration-300"
+                    />
+                  </div>
+
+                  {/* Category */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                      Category <span className="text-[#5DD62C]">*</span>
+                    </label>
+                    <select
+                      value={projCategory}
+                      onChange={(e) => setProjCategory(e.target.value)}
+                      className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-[#F8F8F8] text-xs focus:border-[#5DD62C] outline-none transition-all duration-300 capitalize"
+                    >
+                      {(taxonomies?.categories || []).map((cat) => (
+                        <option key={cat.id} value={cat.id}>{cat.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Platform */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                      Target Platform <span className="text-[#5DD62C]">*</span>
+                    </label>
+                    <select
+                      value={projPlatform}
+                      onChange={(e) => setProjPlatform(e.target.value)}
+                      className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-[#F8F8F8] text-xs focus:border-[#5DD62C] outline-none transition-all duration-300"
+                    >
+                      {(taxonomies?.platforms || []).map((plat) => (
+                        <option key={plat} value={plat}>{plat}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Short Description */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                      Short Description <span className="text-zinc-650">(Optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Briefly describe the visual concept or client goal"
+                      value={projDescription}
+                      onChange={(e) => setProjDescription(e.target.value)}
+                      className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-[#F8F8F8] text-xs focus:border-[#5DD62C] focus:ring-1 focus:ring-[#5DD62C] outline-none transition-all duration-300"
+                    />
+                  </div>
+
+                  {/* Featured Project Option */}
+                  <div className="flex items-center gap-3 bg-[#141414] border border-zinc-800 rounded-xl px-4 py-3 h-[46px] mt-auto">
+                    <input
+                      id="isFeatured"
+                      type="checkbox"
+                      checked={projIsFeatured}
+                      onChange={(e) => setProjIsFeatured(e.target.checked)}
+                      className="w-4 h-4 rounded text-[#5DD62C] bg-zinc-950 border-zinc-800 focus:ring-0 focus:ring-offset-0 focus:outline-none cursor-pointer accent-[#5DD62C]"
+                    />
+                    <label htmlFor="isFeatured" className="text-xs font-mono font-bold text-zinc-300 uppercase tracking-wider cursor-pointer select-none">
+                      Mark as Featured Project
+                    </label>
+                  </div>
+
+                  {/* Display Order Field */}
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider flex items-center justify-between">
+                      <span>Display Order Number</span>
+                      <span className="text-[10px] text-zinc-500 normal-case font-normal">(Optional: Lower numbers first)</span>
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 1, 2, 3"
+                      value={projDisplayOrder}
+                      onChange={(e) => setProjDisplayOrder(e.target.value)}
+                      min="1"
+                      className="px-4 py-3 rounded-xl bg-[#141414] border border-zinc-800 text-[#F8F8F8] text-xs focus:border-[#5DD62C] focus:ring-1 focus:ring-[#5DD62C] outline-none transition-all duration-300"
+                    />
+                  </div>
+
+                </div>
+
+                {/* Software Used (Required Checklist rendered as elegant clickable badges) */}
+                <div className="flex flex-col gap-2.5">
+                  <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                    Software Used <span className="text-[#5DD62C]">*</span> <span className="text-[10px] text-zinc-500 font-normal normal-case">(Select all that apply)</span>
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {(taxonomies?.software || []).map((sw) => {
+                      const isSelected = projSoftware.includes(sw);
+                      return (
+                        <button
+                          type="button"
+                          key={sw}
+                          onClick={() => {
+                            if (projSoftware.includes(sw)) {
+                              setProjSoftware(projSoftware.filter(s => s !== sw));
+                            } else {
+                              setProjSoftware([...projSoftware, sw]);
+                            }
+                          }}
+                          className={`px-3 py-2 rounded-xl text-xs font-medium font-mono border transition-all duration-200 flex items-center gap-1.5 ${
+                            isSelected
+                              ? 'bg-[#5DD62C]/10 text-[#5DD62C] border-[#5DD62C]'
+                              : 'bg-zinc-950/40 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-[#5DD62C] animate-pulse' : 'bg-zinc-650'}`} />
+                          <span>{sw}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* DRAG AND DROP / FILE PICKER IMAGE UPLOADER */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-wider">
+                    Project Image <span className="text-[#5DD62C]">*</span>
+                  </label>
+                  
+                  <div
+                    onDragEnter={(e) => { e.preventDefault(); setDragActive(true); }}
+                    onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+                    onDragLeave={(e) => { e.preventDefault(); setDragActive(false); }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDragActive(false);
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        const file = e.dataTransfer.files[0];
+                        if (file.type.startsWith('image/')) {
+                          setSelectedFile(file);
+                          setProjImageUrl(URL.createObjectURL(file));
+                        } else {
+                          alert('Please drop an image file only (PNG, JPG, etc.).');
+                        }
+                      }
+                    }}
+                    className={`relative border-2 border-dashed rounded-3xl p-8 flex flex-col items-center justify-center min-h-[220px] transition-all duration-300 text-center ${
+                      dragActive
+                        ? 'bg-[#5DD62C]/5 border-[#5DD62C]'
+                        : projImageUrl
+                          ? 'bg-zinc-950/40 border-zinc-800/80'
+                          : 'bg-zinc-950/20 border-zinc-800 hover:border-zinc-700'
+                    }`}
+                  >
+                    {uploadProgress ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-10 h-10 border-4 border-[#5DD62C] border-t-transparent rounded-full animate-spin" />
+                        <p className="text-xs font-mono text-zinc-400">Uploading assets to Cloudinary...</p>
+                      </div>
+                    ) : projImageUrl ? (
+                      <div className="w-full h-full flex flex-col md:flex-row items-center gap-6">
+                        {/* Image preview window */}
+                        <div className="w-full md:w-1/2 aspect-[16/9] rounded-2xl overflow-hidden border border-zinc-800 relative bg-[#0A0A0A]">
+                          <img
+                            src={projImageUrl}
+                            alt="Uploaded preview"
+                            className="w-full h-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                          <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity duration-200">
+                            <span className="text-[10px] font-mono text-[#F8F8F8] bg-zinc-900/90 border border-zinc-800 px-3 py-1 rounded-full uppercase">Image Loaded</span>
+                          </div>
+                        </div>
+
+                        {/* Upload replacement options */}
+                        <div className="flex-1 text-left flex flex-col gap-2">
+                          <div className="flex items-center gap-2 text-[#5DD62C] font-mono text-xs font-bold uppercase">
+                            <LucideIcon name="CheckCircle2" size={16} />
+                            <span>{selectedFile ? 'Image Selected!' : 'Upload Complete!'}</span>
+                          </div>
+                          <p className="text-[11px] text-zinc-400 leading-relaxed max-w-xs">
+                            {selectedFile 
+                              ? "Your cover image is loaded. Clicking 'Publish Project' below will upload it to Cloudinary and save it instantly." 
+                              : "Your cover image is successfully hosted on Cloudinary. Dropping another file or uploading below will replace this item."}
+                          </p>
+                          <label className="mt-2 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-bold text-zinc-300 hover:text-zinc-100 cursor-pointer transition-colors max-w-xs">
+                            <LucideIcon name="RefreshCw" size={12} />
+                            <span>Replace Cover Image</span>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  setSelectedFile(file);
+                                  setProjImageUrl(URL.createObjectURL(file));
+                                }
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center">
+                        <div className="w-12 h-12 rounded-2xl bg-[#5DD62C]/10 flex items-center justify-center text-[#5DD62C] mb-4">
+                          <LucideIcon name="CloudUpload" size={24} />
+                        </div>
+                        <h4 className="text-sm font-bold text-zinc-300">Drag and drop project image here</h4>
+                        <p className="text-[11px] text-zinc-500 mt-1 max-w-xs leading-normal">
+                          Supports high-res PNG, JPG, or WEBP. Max file size recommended: 5MB.
+                        </p>
+                        <div className="flex items-center gap-2 my-4 w-full max-w-xs">
+                          <div className="h-px bg-zinc-800 flex-1" />
+                          <span className="text-[10px] font-mono text-zinc-650 uppercase">or</span>
+                          <div className="h-px bg-zinc-800 flex-1" />
+                        </div>
+                        <label className="px-4 py-2.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800/80 hover:border-zinc-700 rounded-xl text-xs font-bold text-zinc-300 hover:text-[#F8F8F8] cursor-pointer transition-colors flex items-center justify-center gap-1.5">
+                          <LucideIcon name="Upload" size={14} />
+                          <span>Select Cover Image</span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) {
+                                setSelectedFile(file);
+                                setProjImageUrl(URL.createObjectURL(file));
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Submit button row */}
+                <div className="flex items-center gap-3 pt-4 border-t border-zinc-900 justify-end">
+                  {editingProject?.id && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingProject(null)}
+                      className="px-5 py-3 rounded-xl bg-zinc-950/80 hover:bg-zinc-900 border border-zinc-850 hover:border-zinc-800 text-xs font-bold text-zinc-400 hover:text-zinc-200 transition-all duration-200"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={uploadProgress || !projTitle || projSoftware.length === 0 || !projImageUrl}
+                    className="px-6 py-3 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 disabled:opacity-50 text-[#0F0F0F] font-bold text-xs transition-all duration-300 flex items-center justify-center gap-2 hover:scale-[1.01]"
+                  >
+                    {uploadProgress ? (
+                      <div className="w-4 h-4 border-2 border-[#0F0F0F] border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <span>{editingProject?.id ? 'Save Changes' : 'Publish Project'}</span>
+                        <LucideIcon name={editingProject?.id ? "Save" : "Compass"} size={14} />
+                      </>
+                    )}
+                  </button>
+                </div>
+
+              </form>
+            </div>
+
+            {/* PROJECT MANAGEMENT GRID (Displays all current portfolio projects) */}
+            <div className="flex flex-col gap-5 text-left">
+              <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between border-b border-zinc-900 pb-5">
+                <div>
+                  <h3 className="text-lg font-black text-[#F8F8F8] uppercase tracking-tight">
+                    Current Portfolio Projects
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Showing <strong className="text-zinc-300">{filteredPortfolio.length}</strong> live portfolio showcase items. Search or filter instantly.
+                  </p>
+                </div>
+
+                {/* Filters */}
+                <div className="flex flex-wrap gap-2.5 items-center w-full md:w-auto">
+                  {/* Search */}
+                  <div className="relative shrink-0">
+                    <span className="absolute left-3 top-2.5 text-zinc-500">
+                      <LucideIcon name="Search" size={14} />
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Search works..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="bg-[#141414] border border-zinc-800/80 rounded-xl pl-9 pr-4 py-2 text-xs w-44 focus:outline-none focus:border-[#5DD62C]"
+                    />
+                  </div>
+
+                  {/* Category Filter */}
+                  <select
+                    value={filterCategory}
+                    onChange={(e) => setFilterCategory(e.target.value)}
+                    className="bg-[#141414] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C] capitalize"
+                  >
+                    <option value="all">All Categories</option>
+                    {(taxonomies?.categories || []).map((cat) => (
+                      <option key={cat.id} value={cat.id}>{cat.label}</option>
+                    ))}
+                  </select>
+
+                  {/* Sorter */}
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="bg-[#141414] border border-zinc-800/80 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                  >
+                    <option value="order">Live/Manual Display Order</option>
+                    <option value="newest">Newest First</option>
+                    <option value="oldest">Oldest First</option>
+                    <option value="az">A to Z</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Reordering Instructions Banner */}
+              <div className="px-5 py-3.5 rounded-2xl bg-[#141414]/50 border border-zinc-850/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                    isReorderingEnabled ? 'bg-[#5DD62C]/10 text-[#5DD62C]' : 'bg-amber-500/10 text-amber-500'
+                  }`}>
+                    <LucideIcon name={isReorderingEnabled ? "Move" : "AlertCircle"} size={16} />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-[#F8F8F8]">
+                      {isReorderingEnabled ? "Manual Project Ordering is ACTIVE" : "Manual Project Ordering is PAUSED"}
+                    </h4>
+                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
+                      {isReorderingEnabled 
+                        ? "Drag and drop any project card or use the Move Up / Move Down buttons. Your changes are saved instantly to Firestore."
+                        : sortBy !== 'order'
+                          ? "To reorder, please set the sorting dropdown back to 'Live/Manual Display Order'."
+                          : "Please clear your search query and select 'All Categories' to drag, drop, and reorder projects."
+                      }
+                    </p>
+                  </div>
+                </div>
+                {isReorderingEnabled && (
+                  <span className="px-2.5 py-1 rounded bg-[#5DD62C]/10 border border-[#5DD62C]/20 text-[10px] font-mono text-[#5DD62C] font-bold uppercase tracking-wider animate-pulse shrink-0">
+                    Live Drag & Drop
+                  </span>
+                )}
+              </div>
+
+              {/* Grid Layout of items */}
+              {filteredPortfolio.length === 0 ? (
+                <div className="p-12 text-center bg-zinc-950/20 border border-zinc-850 rounded-3xl">
+                  <LucideIcon name="FolderOpen" className="text-zinc-600 mx-auto mb-3" size={36} />
+                  <p className="text-xs text-zinc-500 font-mono">No portfolio items found matching your filter criteria.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {filteredPortfolio.map((item, idx) => {
+                    return (
+                      <div
+                        key={item.id}
+                        draggable={isReorderingEnabled}
+                        onDragStart={(e) => {
+                          if (!isReorderingEnabled) return;
+                          e.dataTransfer.setData('text/plain', idx.toString());
+                        }}
+                        onDragOver={(e) => {
+                          if (!isReorderingEnabled) return;
+                          e.preventDefault();
+                        }}
+                        onDrop={(e) => {
+                          if (!isReorderingEnabled) return;
+                          const dragIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+                          handleReorder(dragIdx, idx);
+                        }}
+                        className={`glass rounded-2xl overflow-hidden border border-zinc-800/60 flex flex-col justify-between group transition-all duration-300 hover:border-zinc-700 hover:shadow-xl hover:shadow-black/20 relative ${
+                          isReorderingEnabled ? 'cursor-grab active:cursor-grabbing hover:bg-zinc-900/10' : ''
+                        }`}
+                      >
+                        {/* Photo Area */}
+                        <div className="aspect-[16/9] relative bg-[#0F0F0F] overflow-hidden shrink-0">
+                          <img
+                            src={item.imageUrl}
+                            alt={item.title}
+                            className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity duration-300"
+                            referrerPolicy="no-referrer"
+                          />
+                          
+                          {/* Categories/Platforms badges */}
+                          <div className="absolute top-3 left-3 flex flex-wrap gap-1 z-10">
+                            <span className="px-2 py-0.5 rounded bg-black/80 border border-zinc-800 text-[9px] font-mono text-[#5DD62C] font-bold uppercase tracking-wider">
+                              {item.category?.replace('_', ' ')}
+                            </span>
+                            {item.platform && (
+                              <span className="px-2 py-0.5 rounded bg-black/80 border border-zinc-800 text-[9px] font-mono text-zinc-300 uppercase">
+                                {item.platform}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Featured badge and toggle button */}
+                          <button
+                            type="button"
+                            onClick={() => handleToggleFeatured(item)}
+                            className={`absolute top-3 right-3 p-1.5 rounded-lg border transition-all duration-200 z-10 ${
+                              item.isFeatured
+                                ? 'bg-[#5DD62C]/20 border-[#5DD62C] text-[#5DD62C]'
+                                : 'bg-black/60 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-black/80'
+                            }`}
+                            title={item.isFeatured ? "Pinned as Featured! Click to unfeature" : "Click to Pin as Featured"}
+                          >
+                            <LucideIcon name="Star" size={12} className={item.isFeatured ? "fill-[#5DD62C] text-[#5DD62C]" : "text-zinc-400"} />
+                          </button>
+                        </div>
+
+                        {/* Text Area */}
+                        <div className="p-5 flex-1 flex flex-col justify-between gap-4">
+                          <div>
+                            <div className="flex items-start justify-between gap-2 mb-1">
+                              <h4 className="text-sm font-bold text-[#F8F8F8] truncate flex-1">
+                                {item.title}
+                              </h4>
+                              <div className="flex items-center gap-1 text-[10px] font-mono text-zinc-400 shrink-0">
+                                <span>Order:</span>
+                                <span className="text-[#5DD62C] font-bold">
+                                  #{item.displayOrder !== undefined ? item.displayOrder : 'N/A'}
+                                </span>
+                              </div>
+                            </div>
+                            
+                            <p className="text-xs text-zinc-500 line-clamp-2 leading-relaxed h-8">
+                              {item.description || 'No description provided.'}
+                            </p>
+                            
+                            {/* Render Software Badges if present */}
+                            {item.softwareUsed && item.softwareUsed.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-3">
+                                {item.softwareUsed.map((sw, idx) => (
+                                  <span
+                                    key={`${sw}-${idx}`}
+                                    className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-[8px] text-zinc-400 font-mono"
+                                  >
+                                    {sw.split(' ').pop()}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Action Buttons row */}
+                          <div className="flex gap-1.5 border-t border-zinc-900/60 pt-3.5 mt-auto">
+                            {isReorderingEnabled && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleMoveProject(idx, 'up')}
+                                  disabled={idx === 0}
+                                  className="px-2 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-850 disabled:opacity-20 border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors flex items-center justify-center shrink-0"
+                                  title="Move Up"
+                                >
+                                  <LucideIcon name="ArrowUp" size={12} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleMoveProject(idx, 'down')}
+                                  disabled={idx === filteredPortfolio.length - 1}
+                                  className="px-2 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-850 disabled:opacity-20 border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors flex items-center justify-center shrink-0"
+                                  title="Move Down"
+                                >
+                                  <LucideIcon name="ArrowDown" size={12} />
+                                </button>
+                              </>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingProject(item);
+                                const formEl = document.getElementById('portfolio-form-container');
+                                if (formEl) {
+                                  formEl.scrollIntoView({ behavior: 'smooth' });
+                                }
+                              }}
+                              className="flex-1 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] font-bold text-zinc-300 hover:text-zinc-100 transition-colors flex items-center justify-center gap-1"
+                            >
+                              <LucideIcon name="Edit" size={12} />
+                              <span>Edit</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setPreviewProject(item)}
+                              className="px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-zinc-100 transition-colors flex items-center justify-center"
+                              title="Preview Project Layout"
+                            >
+                              <LucideIcon name="Eye" size={12} />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (confirm(`Are you sure you want to delete "${item.title}"? This cannot be undone.`)) {
+                                  try {
+                                    await deletePortfolioItem(item.id);
+                                    setSuccessMessage("Project deleted successfully.");
+                                    setTimeout(() => setSuccessMessage(null), 4000);
+                                  } catch (error: any) {
+                                    alert("Failed to delete project: " + error.message);
+                                  }
+                                }
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 text-red-400 hover:text-red-300 transition-colors flex items-center justify-center"
+                              title="Delete Project"
+                            >
+                              <LucideIcon name="Trash2" size={12} />
+                            </button>
+                          </div>
+                        </div>
+
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* PREVIEW PROJECT MODAL (Rendered beautifully in the panel itself) */}
+            {previewProject && (
+              <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4">
+                <div className="bg-[#141414] border border-zinc-800 w-full max-w-3xl rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh] text-left">
+                  {/* Image banner area */}
+                  <div className="aspect-[16/9] relative bg-[#0C0C0C] shrink-0">
+                    <img
+                      src={previewProject.imageUrl}
+                      alt={previewProject.title}
+                      className="w-full h-full object-contain"
+                      referrerPolicy="no-referrer"
+                    />
+                    <button
+                      onClick={() => setPreviewProject(null)}
+                      className="absolute top-4 right-4 p-2 rounded-full bg-black/80 text-zinc-400 hover:text-[#F8F8F8] border border-zinc-800 transition-colors"
+                    >
+                      <LucideIcon name="X" size={18} />
+                    </button>
+                  </div>
+
+                  {/* Text Description and detail Area */}
+                  <div className="p-6 md:p-8 overflow-y-auto flex-1 flex flex-col gap-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full bg-[#5DD62C]/15 border border-[#5DD62C]/25 text-[10px] font-mono text-[#5DD62C] font-semibold uppercase">
+                        {previewProject.category?.replace('_', ' ')}
+                      </span>
+                      {previewProject.platform && (
+                        <span className="px-2.5 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-400 font-semibold uppercase">
+                          Platform: <strong className="text-zinc-200 font-sans">{previewProject.platform}</strong>
+                        </span>
+                      )}
+                    </div>
+
+                    <div>
+                      <h3 className="text-xl font-extrabold text-[#F8F8F8] tracking-tight">
+                        {previewProject.title}
+                      </h3>
+                      <p className="text-zinc-400 text-xs font-sans mt-2 leading-relaxed">
+                        {previewProject.description || 'No description available for this work.'}
+                      </p>
+                    </div>
+
+                    {/* Software Used List */}
+                    {previewProject.softwareUsed && previewProject.softwareUsed.length > 0 && (
+                      <div className="flex flex-col gap-2 border-t border-zinc-900 pt-4 mt-2">
+                        <h4 className="text-[10px] font-mono font-bold text-zinc-500 uppercase tracking-wider">
+                          Tools & Applications Used:
+                        </h4>
+                        <div className="flex flex-wrap gap-1.5">
+                          {previewProject.softwareUsed.map((sw, idx) => (
+                            <span
+                              key={`${sw}-${idx}`}
+                              className="px-2.5 py-1 rounded-lg bg-[#5DD62C]/5 border border-[#5DD62C]/10 text-[10px] text-zinc-300 font-mono"
+                            >
+                              {sw}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer actions inside preview */}
+                  <div className="p-4 bg-zinc-950/40 border-t border-zinc-900/80 flex justify-end shrink-0">
+                    <button
+                      onClick={() => setPreviewProject(null)}
+                      className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-xs font-bold text-zinc-300"
+                    >
+                      Close Preview
+                    </button>
+                  </div>
+
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: TAXONOMIES (CATEGORIES, PLATFORMS, SOFTWARE USED)
+            ========================================================================= */}
+        {activeTab === 'taxonomies' && (
+          <div className="flex flex-col gap-10 text-left">
+            
+            {/* Header info card */}
+            <div className="glass p-6 rounded-2xl border border-zinc-800/85">
+              <h3 className="text-lg font-bold text-[#F8F8F8] mb-2 font-heading flex items-center gap-2">
+                <LucideIcon name="Settings2" size={20} className="text-[#5DD62C]" />
+                Taxonomy & Asset Metadata Manager
+              </h3>
+              <p className="text-zinc-400 text-xs leading-relaxed max-w-3xl">
+                Create, read, update, and permanently delete categories, platform names, and software metadata. Any updates made here instantly propagate to the live website filters and project submission options.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+              
+              {/* SECTION: CATEGORIES */}
+              <div className="glass p-6 rounded-2xl border border-zinc-800/80 flex flex-col gap-6">
+                <div className="border-b border-zinc-900 pb-3 flex justify-between items-center">
+                  <h4 className="text-sm font-bold text-zinc-200 flex items-center gap-2 font-heading">
+                    <LucideIcon name="Layers" size={16} className="text-[#5DD62C]" />
+                    Categories ({taxonomies?.categories?.length || 0})
+                  </h4>
+                </div>
+
+                {/* Create Category Form */}
+                <form 
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!newCatId || !newCatLabel) {
+                      alert('Please fill in both Category ID and Label!');
+                      return;
+                    }
+                    const cleanId = newCatId.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+                    const exists = taxonomies.categories.some(c => c.id === cleanId);
+                    if (exists) {
+                      alert('A category with this ID already exists!');
+                      return;
+                    }
+                    const updatedCategories = [...taxonomies.categories, { id: cleanId, label: newCatLabel.trim() }];
+                    await updateTaxonomies({ ...taxonomies, categories: updatedCategories });
+                    setNewCatId('');
+                    setNewCatLabel('');
+                    alert('Category added successfully!');
+                  }}
+                  className="bg-zinc-950/40 p-4 rounded-xl border border-zinc-900 flex flex-col gap-3"
+                >
+                  <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Add New Category</span>
+                  <div>
+                    <label className="text-[10px] font-mono text-zinc-500 block mb-1">Category ID (lowercase, no spaces)</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. flyers"
+                      value={newCatId}
+                      onChange={(e) => setNewCatId(e.target.value)}
+                      className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono text-zinc-500 block mb-1">Category Label</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Marketing Flyers"
+                      value={newCatLabel}
+                      onChange={(e) => setNewCatLabel(e.target.value)}
+                      className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                    />
+                  </div>
+                  <button type="submit" className="mt-1 w-full py-2 rounded-lg bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-xs font-bold text-[#0F0F0F] transition-all">
+                    Add Category
+                  </button>
+                </form>
+
+                {/* Edit Category Form (when active) */}
+                {editingCatId !== null && (
+                  <div className="bg-[#5DD62C]/5 p-4 rounded-xl border border-[#5DD62C]/20 flex flex-col gap-3">
+                    <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Edit Category</span>
+                    <div>
+                      <label className="text-[10px] font-mono text-zinc-500 block mb-1">Label for ID "{editingCatId}"</label>
+                      <input 
+                        type="text" 
+                        value={editingCatLabel}
+                        onChange={(e) => setEditingCatLabel(e.target.value)}
+                        className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          if (!editingCatLabel.trim()) {
+                            alert('Label cannot be empty!');
+                            return;
+                          }
+                          const updated = taxonomies.categories.map(c => 
+                            c.id === editingCatId ? { ...c, label: editingCatLabel.trim() } : c
+                          );
+                          await updateTaxonomies({ ...taxonomies, categories: updated });
+                          setEditingCatId(null);
+                          setEditingCatLabel('');
+                          alert('Category updated successfully!');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-[#5DD62C] text-xs font-bold text-[#0F0F0F]"
+                      >
+                        Save
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setEditingCatId(null);
+                          setEditingCatLabel('');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-zinc-900 text-xs font-bold text-zinc-400 border border-zinc-800 hover:text-zinc-200"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Categories List */}
+                <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto pr-1">
+                  {(taxonomies?.categories || []).map((cat) => (
+                    <div key={cat.id} className="bg-zinc-900/60 hover:bg-zinc-900 p-3 rounded-xl border border-zinc-850 flex items-center justify-between group transition-colors">
+                      <div className="min-w-0">
+                        <span className="text-xs font-bold text-[#F8F8F8] block truncate capitalize">{cat.label}</span>
+                        <span className="text-[9px] font-mono text-zinc-500 block truncate">ID: {cat.id}</span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button 
+                          onClick={() => {
+                            setEditingCatId(cat.id);
+                            setEditingCatLabel(cat.label);
+                          }}
+                          className="p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-lg transition-all"
+                          title="Edit Category"
+                        >
+                          <LucideIcon name="Edit" size={13} />
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            if (confirm(`Are you sure you want to permanently delete the category "${cat.label}"? This will remove it from website filters immediately.`)) {
+                              const updated = taxonomies.categories.filter(c => c.id !== cat.id);
+                              await updateTaxonomies({ ...taxonomies, categories: updated });
+                              alert('Category deleted successfully!');
+                            }
+                          }}
+                          className="p-1.5 hover:bg-red-950 text-zinc-500 hover:text-red-400 rounded-lg transition-all"
+                          title="Delete Category"
+                        >
+                          <LucideIcon name="Trash2" size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+
+              {/* SECTION: PLATFORMS */}
+              <div className="glass p-6 rounded-2xl border border-zinc-800/80 flex flex-col gap-6">
+                <div className="border-b border-zinc-900 pb-3 flex justify-between items-center">
+                  <h4 className="text-sm font-bold text-zinc-200 flex items-center gap-2 font-heading">
+                    <LucideIcon name="Monitor" size={16} className="text-[#5DD62C]" />
+                    Target Platforms ({taxonomies?.platforms?.length || 0})
+                  </h4>
+                </div>
+
+                {/* Create Platform Form */}
+                <form 
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!newPlatName.trim()) {
+                      alert('Please specify a Platform Name!');
+                      return;
+                    }
+                    const cleanName = newPlatName.trim();
+                    const exists = taxonomies.platforms.some(p => p.toLowerCase() === cleanName.toLowerCase());
+                    if (exists) {
+                      alert('A platform with this name already exists!');
+                      return;
+                    }
+                    const updatedPlatforms = [...taxonomies.platforms, cleanName];
+                    await updateTaxonomies({ ...taxonomies, platforms: updatedPlatforms });
+                    setNewPlatName('');
+                    alert('Platform added successfully!');
+                  }}
+                  className="bg-zinc-950/40 p-4 rounded-xl border border-zinc-900 flex flex-col gap-3"
+                >
+                  <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Add New Platform</span>
+                  <div>
+                    <label className="text-[10px] font-mono text-zinc-500 block mb-1">Platform Name</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Twitter / X"
+                      value={newPlatName}
+                      onChange={(e) => setNewPlatName(e.target.value)}
+                      className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                    />
+                  </div>
+                  <button type="submit" className="mt-1 w-full py-2 rounded-lg bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-xs font-bold text-[#0F0F0F] transition-all">
+                    Add Platform
+                  </button>
+                </form>
+
+                {/* Edit Platform Form */}
+                {editingPlatIndex !== null && (
+                  <div className="bg-[#5DD62C]/5 p-4 rounded-xl border border-[#5DD62C]/20 flex flex-col gap-3">
+                    <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Edit Platform</span>
+                    <div>
+                      <label className="text-[10px] font-mono text-zinc-500 block mb-1">Platform Name</label>
+                      <input 
+                        type="text" 
+                        value={editingPlatName}
+                        onChange={(e) => setEditingPlatName(e.target.value)}
+                        className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          if (!editingPlatName.trim()) {
+                            alert('Platform name cannot be empty!');
+                            return;
+                          }
+                          const updated = taxonomies.platforms.map((p, idx) => 
+                            idx === editingPlatIndex ? editingPlatName.trim() : p
+                          );
+                          await updateTaxonomies({ ...taxonomies, platforms: updated });
+                          setEditingPlatIndex(null);
+                          setEditingPlatName('');
+                          alert('Platform updated successfully!');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-[#5DD62C] text-xs font-bold text-[#0F0F0F]"
+                      >
+                        Save
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setEditingPlatIndex(null);
+                          setEditingPlatName('');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-zinc-900 text-xs font-bold text-zinc-400 border border-zinc-800 hover:text-zinc-200"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Platforms List */}
+                <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto pr-1">
+                  {(taxonomies?.platforms || []).map((plat, idx) => (
+                    <div key={`${plat}-${idx}`} className="bg-zinc-900/60 hover:bg-zinc-900 p-3 rounded-xl border border-zinc-850 flex items-center justify-between group transition-colors">
+                      <span className="text-xs font-bold text-[#F8F8F8] truncate">{plat}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button 
+                          onClick={() => {
+                            setEditingPlatIndex(idx);
+                            setEditingPlatName(plat);
+                          }}
+                          className="p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-lg transition-all"
+                          title="Edit Platform"
+                        >
+                          <LucideIcon name="Edit" size={13} />
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            if (confirm(`Are you sure you want to permanently delete "${plat}"? It will be removed from available options.`)) {
+                              const updated = taxonomies.platforms.filter((_, i) => i !== idx);
+                              await updateTaxonomies({ ...taxonomies, platforms: updated });
+                              alert('Platform deleted successfully!');
+                            }
+                          }}
+                          className="p-1.5 hover:bg-red-950 text-zinc-500 hover:text-red-400 rounded-lg transition-all"
+                          title="Delete Platform"
+                        >
+                          <LucideIcon name="Trash2" size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+
+              {/* SECTION: SOFTWARE USED */}
+              <div className="glass p-6 rounded-2xl border border-zinc-800/80 flex flex-col gap-6">
+                <div className="border-b border-zinc-900 pb-3 flex justify-between items-center">
+                  <h4 className="text-sm font-bold text-zinc-200 flex items-center gap-2 font-heading">
+                    <LucideIcon name="Laptop" size={16} className="text-[#5DD62C]" />
+                    Software Used ({taxonomies?.software?.length || 0})
+                  </h4>
+                </div>
+
+                {/* Create Software Form */}
+                <form 
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!newSoftName.trim()) {
+                      alert('Please specify a Software Name!');
+                      return;
+                    }
+                    const cleanName = newSoftName.trim();
+                    const exists = taxonomies.software.some(s => s.toLowerCase() === cleanName.toLowerCase());
+                    if (exists) {
+                      alert('Software already exists in list!');
+                      return;
+                    }
+                    const updatedSoftware = [...taxonomies.software, cleanName];
+                    await updateTaxonomies({ ...taxonomies, software: updatedSoftware });
+                    setNewSoftName('');
+                    alert('Software added successfully!');
+                  }}
+                  className="bg-zinc-950/40 p-4 rounded-xl border border-zinc-900 flex flex-col gap-3"
+                >
+                  <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Add New Software</span>
+                  <div>
+                    <label className="text-[10px] font-mono text-zinc-500 block mb-1">Software Title</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Cinema 4D"
+                      value={newSoftName}
+                      onChange={(e) => setNewSoftName(e.target.value)}
+                      className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                    />
+                  </div>
+                  <button type="submit" className="mt-1 w-full py-2 rounded-lg bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-xs font-bold text-[#0F0F0F] transition-all">
+                    Add Software
+                  </button>
+                </form>
+
+                {/* Edit Software Form */}
+                {editingSoftIndex !== null && (
+                  <div className="bg-[#5DD62C]/5 p-4 rounded-xl border border-[#5DD62C]/20 flex flex-col gap-3">
+                    <span className="text-[10px] font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Edit Software</span>
+                    <div>
+                      <label className="text-[10px] font-mono text-zinc-500 block mb-1">Software Title</label>
+                      <input 
+                        type="text" 
+                        value={editingSoftName}
+                        onChange={(e) => setEditingSoftName(e.target.value)}
+                        className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          if (!editingSoftName.trim()) {
+                            alert('Software name cannot be empty!');
+                            return;
+                          }
+                          const updated = taxonomies.software.map((s, idx) => 
+                            idx === editingSoftIndex ? editingSoftName.trim() : s
+                          );
+                          await updateTaxonomies({ ...taxonomies, software: updated });
+                          setEditingSoftIndex(null);
+                          setEditingSoftName('');
+                          alert('Software updated successfully!');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-[#5DD62C] text-xs font-bold text-[#0F0F0F]"
+                      >
+                        Save
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setEditingSoftIndex(null);
+                          setEditingSoftName('');
+                        }}
+                        className="flex-1 py-1.5 rounded-lg bg-zinc-900 text-xs font-bold text-zinc-400 border border-zinc-800 hover:text-zinc-200"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Software List */}
+                <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto pr-1">
+                  {(taxonomies?.software || []).map((sw, idx) => (
+                    <div key={`${sw}-${idx}`} className="bg-zinc-900/60 hover:bg-zinc-900 p-3 rounded-xl border border-zinc-850 flex items-center justify-between group transition-colors">
+                      <span className="text-xs font-bold text-[#F8F8F8] truncate">{sw}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button 
+                          onClick={() => {
+                            setEditingSoftIndex(idx);
+                            setEditingSoftName(sw);
+                          }}
+                          className="p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded-lg transition-all"
+                          title="Edit Software"
+                        >
+                          <LucideIcon name="Edit" size={13} />
+                        </button>
+                        <button 
+                          onClick={async () => {
+                            if (confirm(`Are you sure you want to permanently delete "${sw}"? It will be removed from project metadata choices.`)) {
+                              const updated = taxonomies.software.filter((_, i) => i !== idx);
+                              await updateTaxonomies({ ...taxonomies, software: updated });
+                              alert('Software deleted successfully!');
+                            }
+                          }}
+                          className="p-1.5 hover:bg-red-950 text-zinc-500 hover:text-red-400 rounded-lg transition-all"
+                          title="Delete Software"
+                        >
+                          <LucideIcon name="Trash2" size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+
+            </div>
+
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: SERVICES
+            ========================================================================= */}
+        {activeTab === 'services' && (
+          <div className="flex flex-col gap-8">
+            <div className="flex justify-between items-center">
+              {/* Section Header Editor */}
+              <div className="glass p-6 rounded-2xl border border-zinc-800/50 max-w-xl text-left flex-1 mr-4">
+                <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-4">Services Section Titles</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Badge Text</label>
+                    <input id="servBadgeInput" defaultValue={siteConfig.servicesTitle?.badgeText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Title Text</label>
+                    <input id="servTitleInput" defaultValue={siteConfig.servicesTitle?.titleText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    const b = (document.getElementById('servBadgeInput') as HTMLInputElement)?.value;
+                    const t = (document.getElementById('servTitleInput') as HTMLInputElement)?.value;
+                    updateSiteConfig({
+                      ...siteConfig,
+                      servicesTitle: { badgeText: b, titleText: t }
+                    });
+                    alert('Services section headers updated!');
+                  }}
+                  className="mt-3 px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[#F8F8F8] font-bold text-xs transition-colors"
+                >
+                  Update Section Headers
+                </button>
+              </div>
+
+              <button
+                onClick={() => setEditingService({})}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-xs transition-colors shrink-0 self-end"
+              >
+                <LucideIcon name="Plus" size={16} />
+                <span>Add Service</span>
+              </button>
+            </div>
+
+            {/* Service Edit Modal */}
+            {editingService !== null && (
+              <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+                <div className="bg-[#141414] border border-zinc-800 w-full max-w-lg rounded-3xl p-8 shadow-2xl text-left">
+                  <div className="flex justify-between items-center mb-6 border-b border-zinc-900 pb-4">
+                    <h3 className="text-lg font-bold text-[#F8F8F8]">
+                      {editingService.id ? 'Edit Service' : 'Add New Service'}
+                    </h3>
+                    <button onClick={() => setEditingService(null)} className="text-zinc-500 hover:text-[#F8F8F8] transition-colors">
+                      <LucideIcon name="X" size={20} />
+                    </button>
+                  </div>
+
+                  <form onSubmit={async (e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    const sData = {
+                      title: fd.get('title') as string,
+                      iconName: fd.get('iconName') as string || 'Layers',
+                      description: fd.get('description') as string,
+                      highlights: (fd.get('highlights') as string)?.split(',').map(s => s.trim()) || []
+                    };
+
+                    if (!sData.title || !sData.description) {
+                      alert('Title and Description are required!');
+                      return;
+                    }
+
+                    if (editingService.id) {
+                      await updateService(editingService.id, sData);
+                      alert('Service saved!');
+                    } else {
+                      await addService(sData);
+                      alert('Service added!');
+                    }
+                    setEditingService(null);
+                  }} className="flex flex-col gap-4">
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Service Title *</label>
+                      <input name="title" required defaultValue={editingService.title} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Lucide Icon Name * (e.g. Layers, Code, Sparkles, Tv, Video)</label>
+                      <input name="iconName" required defaultValue={editingService.iconName || 'Sparkles'} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Description *</label>
+                      <textarea name="description" required rows={4} defaultValue={editingService.description} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Highlights (Comma-separated list)</label>
+                      <input name="highlights" defaultValue={editingService.highlights?.join(', ')} placeholder="Pixel-Perfect Thumbnail, Dynamic Layout, High CTR" className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div className="flex gap-4 border-t border-zinc-900 pt-5 mt-2 justify-end">
+                      <button type="button" onClick={() => setEditingService(null)} className="px-5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-bold">
+                        Cancel
+                      </button>
+                      <button type="submit" className="px-5 py-2.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-xs">
+                        Save Service Card
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* List Services */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+              {services.map((serv) => (
+                <div key={serv.id} className="glass p-6 rounded-2xl text-left border border-zinc-800/60 flex flex-col justify-between">
+                  <div>
+                    <div className="w-12 h-12 rounded-xl bg-zinc-900/50 flex items-center justify-center text-[#5DD62C] mb-4">
+                      <LucideIcon name={serv.iconName} size={20} />
+                    </div>
+                    <h4 className="text-sm font-bold text-[#F8F8F8] mb-1">{serv.title}</h4>
+                    <p className="text-xs text-zinc-400 leading-relaxed line-clamp-3 mb-4">{serv.description}</p>
+                  </div>
+                  <div className="flex gap-2 border-t border-zinc-900 pt-3">
+                    <button
+                      onClick={() => setEditingService(serv)}
+                      className="flex-1 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-300 transition-colors flex items-center justify-center gap-1"
+                    >
+                      <LucideIcon name="Edit" size={12} />
+                      <span>Edit</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        if (confirm(`Are you sure you want to delete "${serv.title}"?`)) {
+                          await deleteService(serv.id);
+                          alert('Deleted service!');
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors flex items-center justify-center"
+                    >
+                      <LucideIcon name="Trash2" size={12} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: TESTIMONIALS
+            ========================================================================= */}
+        {activeTab === 'testimonials' && (
+          <div className="flex flex-col gap-8">
+            <div className="flex justify-between items-center">
+              {/* Section Header Editor */}
+              <div className="glass p-6 rounded-2xl border border-zinc-800/50 max-w-xl text-left flex-1 mr-4">
+                <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-4">Testimonials Section Titles</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Badge Text</label>
+                    <input id="testBadgeInput" defaultValue={siteConfig.testimonialsTitle?.badgeText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-mono font-bold text-zinc-500 uppercase block mb-1">Title Text</label>
+                    <input id="testTitleInput" defaultValue={siteConfig.testimonialsTitle?.titleText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    const b = (document.getElementById('testBadgeInput') as HTMLInputElement)?.value;
+                    const t = (document.getElementById('testTitleInput') as HTMLInputElement)?.value;
+                    updateSiteConfig({
+                      ...siteConfig,
+                      testimonialsTitle: { badgeText: b, titleText: t }
+                    });
+                    alert('Testimonials section headers updated!');
+                  }}
+                  className="mt-3 px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[#F8F8F8] font-bold text-xs transition-colors"
+                >
+                  Update Section Headers
+                </button>
+              </div>
+
+              <button
+                onClick={() => setEditingTestimonial({})}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-xs transition-colors shrink-0 self-end"
+              >
+                <LucideIcon name="Plus" size={16} />
+                <span>Add Review</span>
+              </button>
+            </div>
+
+            {/* Testimonials edit overlay */}
+            {editingTestimonial !== null && (
+              <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+                <div className="bg-[#141414] border border-zinc-800 w-full max-w-lg rounded-3xl p-8 shadow-2xl text-left">
+                  <div className="flex justify-between items-center mb-6 border-b border-zinc-900 pb-4">
+                    <h3 className="text-lg font-bold text-[#F8F8F8]">
+                      {editingTestimonial.id ? 'Edit Testimonial' : 'Add New Testimonial'}
+                    </h3>
+                    <button onClick={() => setEditingTestimonial(null)} className="text-zinc-500 hover:text-[#F8F8F8] transition-colors">
+                      <LucideIcon name="X" size={20} />
+                    </button>
+                  </div>
+
+                  <form onSubmit={async (e) => {
+                    e.preventDefault();
+                    const fd = new FormData(e.currentTarget);
+                    const clientName = fd.get('clientName') as string;
+                    const clientRole = fd.get('clientRole') as string;
+                    const content = fd.get('content') as string;
+                    const avatarUrl = fd.get('avatarUrl') as string || '';
+                    const projectCategory = fd.get('projectCategory') as string || '';
+
+                    if (!clientName || !content) {
+                      alert('Client Name and Review Content are required!');
+                      return;
+                    }
+
+                    const tData = {
+                      // Standard fields (matching types.ts and Testimonials.tsx)
+                      name: clientName,
+                      role: clientRole,
+                      feedback: content,
+                      company: projectCategory,
+                      avatarUrl: avatarUrl,
+                      rating: 5,
+                      
+                      // Legacy fields (for AdminDashboard backwards compatibility)
+                      clientName,
+                      clientRole,
+                      content,
+                      projectCategory,
+                    };
+
+                    if (editingTestimonial.id) {
+                      await updateTestimonial(editingTestimonial.id, tData);
+                      alert('Testimonial saved!');
+                    } else {
+                      await addTestimonial(tData);
+                      alert('Testimonial added!');
+                    }
+                    setEditingTestimonial(null);
+                  }} className="flex flex-col gap-4">
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Client Name *</label>
+                      <input name="clientName" required defaultValue={editingTestimonial.clientName || editingTestimonial.name} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Client Role / Company * (e.g. Apex Streamer, Marketing VP)</label>
+                      <input name="clientRole" required defaultValue={editingTestimonial.clientRole || editingTestimonial.role} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Project Category (e.g. Thumbnails, Banners)</label>
+                      <input name="projectCategory" defaultValue={editingTestimonial.projectCategory || editingTestimonial.company} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Avatar Image URL (Optional)</label>
+                      <div className="flex gap-2">
+                        <input id="testAvatarUrlInput" name="avatarUrl" defaultValue={editingTestimonial.avatarUrl} className="flex-1 bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                        <label className="px-4 py-2.5 bg-zinc-800 hover:bg-zinc-700 rounded-xl text-xs font-bold text-zinc-300 cursor-pointer transition-colors shrink-0 flex items-center justify-center">
+                          <LucideIcon name="Upload" size={14} className="mr-1" />
+                          <span>Upload</span>
+                          <input type="file" accept="image/*" className="hidden" onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              handleImageUpload(file, (url) => {
+                                const inp = document.getElementById('testAvatarUrlInput') as HTMLInputElement;
+                                if (inp) inp.value = url;
+                              });
+                            }
+                          }} />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-bold text-zinc-400 block mb-1">Review Content *</label>
+                      <textarea name="content" required rows={4} defaultValue={editingTestimonial.content || editingTestimonial.feedback} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-[#F8F8F8] focus:outline-none focus:border-[#5DD62C]" />
+                    </div>
+
+                    <div className="flex gap-4 border-t border-zinc-900 pt-5 mt-2 justify-end">
+                      <button type="button" onClick={() => setEditingTestimonial(null)} className="px-5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-bold">
+                        Cancel
+                      </button>
+                      <button type="submit" className="px-5 py-2.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-xs">
+                        Save Testimonial
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* List testimonials */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {testimonials.map((test) => (
+                <div key={test.id} className="glass p-6 rounded-2xl text-left border border-zinc-800/60 flex flex-col justify-between">
+                  <div className="mb-4">
+                    <p className="text-xs text-zinc-400 leading-relaxed italic mb-4">"{test.content || test.feedback}"</p>
+                  </div>
+                  <div className="flex items-center justify-between gap-4 border-t border-zinc-900 pt-4">
+                    <div className="flex items-center gap-3">
+                      <img src={test.avatarUrl || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100"} alt={test.clientName || test.name} className="w-9 h-9 rounded-full border border-zinc-800" referrerPolicy="no-referrer" />
+                      <div>
+                        <h4 className="text-xs font-bold text-[#F8F8F8]">{test.clientName || test.name}</h4>
+                        <span className="text-[10px] text-zinc-500 font-mono block">{test.clientRole || test.role}</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={() => setEditingTestimonial(test)}
+                        className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-[#F8F8F8] transition-colors"
+                      >
+                        <LucideIcon name="Edit" size={12} />
+                      </button>
+                      <button
+                        onClick={async () => {
+                          const displayName = test.clientName || test.name || "this";
+                          if (confirm(`Are you sure you want to delete ${displayName}'s review?`)) {
+                            await deleteTestimonial(test.id);
+                            alert('Deleted testimonial successfully!');
+                          }
+                        }}
+                        className="p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors"
+                      >
+                        <LucideIcon name="Trash2" size={12} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: CONTACT & SOCIALS
+            ========================================================================= */}
+        {activeTab === 'contact' && (
+          <div className="glass p-8 rounded-3xl border border-zinc-800/80 text-left max-w-4xl flex flex-col gap-10">
+            <div>
+              <h3 className="text-lg font-bold text-[#F8F8F8] mb-6 font-heading border-b border-zinc-900 pb-3">
+                Contact Form & Direct Channels Config
+              </h3>
+              
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const fd = new FormData(e.currentTarget);
+                updateSiteConfig({
+                  ...siteConfig,
+                  contactInfo: {
+                    ...siteConfig.contactInfo,
+                    badgeText: fd.get('badgeText') as string,
+                    titleText: fd.get('titleText') as string,
+                    directContactTitle: fd.get('directContactTitle') as string,
+                    directContactDesc: fd.get('directContactDesc') as string,
+                    emailAddress: fd.get('emailAddress') as string,
+                    whatsappText: fd.get('whatsappText') as string,
+                    freelanceHubsTitle: fd.get('freelanceHubsTitle') as string,
+                    briefFormTitle: fd.get('briefFormTitle') as string,
+                    briefFormDesc: fd.get('briefFormDesc') as string,
+                  }
+                });
+                alert('Contact & Messaging copy saved to Firestore!');
+              }} className="flex flex-col gap-6">
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Section Badge</label>
+                    <input name="badgeText" defaultValue={siteConfig.contactInfo?.badgeText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Section Title Text</label>
+                    <input name="titleText" defaultValue={siteConfig.contactInfo?.titleText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-zinc-900 pt-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Direct Contact Sidebar Title</label>
+                    <input name="directContactTitle" defaultValue={siteConfig.contactInfo?.directContactTitle} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Direct Contact Description</label>
+                    <input name="directContactDesc" defaultValue={siteConfig.contactInfo?.directContactDesc} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Primary Email Address</label>
+                    <input name="emailAddress" defaultValue={siteConfig.contactInfo?.emailAddress} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">WhatsApp Custom Label (e.g. Text number)</label>
+                    <input name="whatsappText" defaultValue={siteConfig.contactInfo?.whatsappText} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-zinc-900 pt-6">
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Brief Intake Form Title</label>
+                    <input name="briefFormTitle" defaultValue={siteConfig.contactInfo?.briefFormTitle} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Freelance Hub Sidebar Title</label>
+                    <input name="freelanceHubsTitle" defaultValue={siteConfig.contactInfo?.freelanceHubsTitle} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider block mb-2">Brief Intake Form Subtitle Description</label>
+                  <textarea name="briefFormDesc" defaultValue={siteConfig.contactInfo?.briefFormDesc} rows={2} className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-[#5DD62C]" />
+                </div>
+
+                <button type="submit" className="px-6 py-3.5 rounded-xl bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] font-bold text-sm transition-colors mt-4 self-start">
+                  Save Contact Setup
+                </button>
+              </form>
+            </div>
+
+            {/* Social links URL manager */}
+            <div className="border-t border-zinc-900 pt-10 text-left">
+              <h3 className="text-base font-bold text-[#F8F8F8] mb-6 font-heading flex items-center gap-2">
+                <LucideIcon name="Share2" size={18} className="text-[#5DD62C]" />
+                Social Links & Instant Channel Anchors
+              </h3>
+
+              {/* Form to Create New Social Link */}
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!newSocialName.trim() || !newSocialUrl.trim()) {
+                    alert('Please specify both Name and URL for the new social link!');
+                    return;
+                  }
+                  
+                  // Guess matching color class or use nice default
+                  let colorClass = 'text-[#5DD62C] hover:text-[#5DD62C]/80';
+                  const lowerName = newSocialName.toLowerCase();
+                  if (lowerName.includes('discord')) colorClass = 'text-[#5865F2] hover:text-[#5865F2]/80';
+                  else if (lowerName.includes('youtube')) colorClass = 'text-[#FF0000] hover:text-[#FF0000]/80';
+                  else if (lowerName.includes('instagram')) colorClass = 'text-[#E1306C] hover:text-[#E1306C]/80';
+                  else if (lowerName.includes('twitter') || lowerName.includes('x.com')) colorClass = 'text-white hover:text-white/80';
+                  else if (lowerName.includes('facebook')) colorClass = 'text-[#1877F2] hover:text-[#1877F2]/80';
+                  else if (lowerName.includes('linkedin')) colorClass = 'text-[#0A66C2] hover:text-[#0A66C2]/80';
+                  else if (lowerName.includes('github')) colorClass = 'text-[#FEF2F2] hover:text-white/80';
+                  
+                  const newLink = {
+                    name: newSocialName.trim(),
+                    url: newSocialUrl.trim(),
+                    iconName: newSocialIcon.trim(),
+                    colorClass: colorClass,
+                    badgeText: newSocialBadge.trim() || undefined
+                  };
+
+                  const updated = [...socialLinks, newLink];
+                  await updateSocialLinks(updated);
+                  
+                  setNewSocialName('');
+                  setNewSocialUrl('');
+                  setNewSocialIcon('Link');
+                  setNewSocialBadge('');
+                  alert('Social link created successfully!');
+                }}
+                className="bg-zinc-950/40 p-6 rounded-2xl border border-zinc-900 mb-8 grid grid-cols-1 md:grid-cols-4 gap-4 items-end"
+              >
+                <div className="md:col-span-4">
+                  <h4 className="text-xs font-mono font-bold text-[#5DD62C] uppercase tracking-wider">Add New Channel Anchor</h4>
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono text-zinc-500 block mb-1">Channel Name (e.g. Discord)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Discord Server"
+                    value={newSocialName}
+                    onChange={(e) => setNewSocialName(e.target.value)}
+                    className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono text-zinc-500 block mb-1">Target URL</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. https://discord.gg/invite"
+                    value={newSocialUrl}
+                    onChange={(e) => setNewSocialUrl(e.target.value)}
+                    className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono text-zinc-500 block mb-1">Lucide Icon Name</label>
+                  <select
+                    value={newSocialIcon}
+                    onChange={(e) => setNewSocialIcon(e.target.value)}
+                    className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                  >
+                    {['Link', 'MessageSquare', 'Youtube', 'Instagram', 'Twitter', 'Facebook', 'Linkedin', 'Github', 'Mail', 'Phone', 'Send', 'Globe'].map(ico => (
+                      <option key={ico} value={ico}>{ico}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-mono text-zinc-500 block mb-1">Badge Copy (Optional)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="e.g. ACTIVE"
+                      value={newSocialBadge}
+                      onChange={(e) => setNewSocialBadge(e.target.value)}
+                      className="flex-1 bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#5DD62C]"
+                    />
+                    <button type="submit" className="px-4 py-2 bg-[#5DD62C] hover:bg-[#5DD62C]/90 text-[#0F0F0F] text-xs font-bold rounded-lg transition-colors shrink-0">
+                      Create Link
+                    </button>
+                  </div>
+                </div>
+              </form>
+              
+              {/* List of existing Social Links */}
+              <div className="flex flex-col gap-4">
+                {socialLinks.map((link, idx) => (
+                  <div key={link.id || idx} className="p-4 rounded-xl bg-zinc-900/50 border border-zinc-800/60 flex flex-col sm:flex-row gap-4 items-center justify-between">
+                    <div className="flex items-center gap-3 self-start sm:self-center min-w-[200px]">
+                      <div className="w-10 h-10 rounded-lg bg-[#5DD62C]/10 flex items-center justify-center text-[#5DD62C]">
+                        <LucideIcon name={link.iconName || 'Link'} size={18} />
+                      </div>
+                      <div>
+                        {/* Allow renaming in the list */}
+                        <input
+                          id={`soc-name-${idx}`}
+                          defaultValue={link.name}
+                          placeholder="Name"
+                          className="bg-transparent font-bold text-xs text-[#F8F8F8] border-b border-transparent focus:border-[#5DD62C] focus:outline-none py-0.5 w-32"
+                        />
+                        <select
+                          id={`soc-icon-${idx}`}
+                          defaultValue={link.iconName || 'Link'}
+                          className="bg-transparent text-[10px] font-mono text-zinc-500 border-b border-transparent focus:border-[#5DD62C] focus:outline-none py-0.5 w-24 block capitalize"
+                        >
+                          {['Link', 'MessageSquare', 'Youtube', 'Instagram', 'Twitter', 'Facebook', 'Linkedin', 'Github', 'Mail', 'Phone', 'Send', 'Globe'].map(ico => (
+                            <option key={ico} value={ico}>{ico}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex-1 w-full sm:w-auto grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="sm:col-span-2">
+                        <label className="text-[9px] font-mono text-zinc-500 uppercase block mb-1">Anchor Link (URL / Mailto / Tel)</label>
+                        <input
+                          id={`soc-url-${idx}`}
+                          defaultValue={link.url}
+                          className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-[#5DD62C]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-mono text-zinc-500 uppercase block mb-1">Badge Copy</label>
+                        <input
+                          id={`soc-badge-${idx}`}
+                          defaultValue={link.badgeText || ''}
+                          placeholder="e.g. ACTIVE, 24h"
+                          className="w-full bg-[#1A1A1A] border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-[#5DD62C]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                      <button
+                        onClick={async () => {
+                          const nameVal = (document.getElementById(`soc-name-${idx}`) as HTMLInputElement)?.value;
+                          const iconVal = (document.getElementById(`soc-icon-${idx}`) as HTMLInputElement)?.value;
+                          const newUrl = (document.getElementById(`soc-url-${idx}`) as HTMLInputElement)?.value;
+                          const newBadge = (document.getElementById(`soc-badge-${idx}`) as HTMLInputElement)?.value;
+                          const updated = [...socialLinks];
+                          updated[idx] = {
+                            ...updated[idx],
+                            name: nameVal || link.name,
+                            iconName: iconVal || link.iconName || 'Link',
+                            url: newUrl,
+                            badgeText: newBadge || undefined
+                          };
+                          await updateSocialLinks(updated);
+                          alert(`Updated channel anchor for ${link.name}!`);
+                        }}
+                        className="px-3.5 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1"
+                      >
+                        <LucideIcon name="Save" size={13} />
+                        <span>Save</span>
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Are you sure you want to permanently delete the social link "${link.name}"?`)) {
+                            const updated = socialLinks.filter((_, i) => i !== idx);
+                            await updateSocialLinks(updated);
+                            alert('Social link deleted successfully!');
+                          }
+                        }}
+                        className="p-2 bg-red-950/20 hover:bg-red-950/40 border border-red-900/30 text-red-400 hover:text-red-300 rounded-lg transition-colors"
+                        title="Delete Social Link"
+                      >
+                        <LucideIcon name="Trash2" size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+      </main>
+    </div>
+  );
+}

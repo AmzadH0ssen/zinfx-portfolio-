@@ -1,0 +1,6 @@
+{
+  "name": "ZinFX Portfolio",
+  "description": "Premium dark-themed portfolio for ZinFX, a professional graphic designer specializing in YouTube thumbnails, banners, posters, branding, and social media design.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

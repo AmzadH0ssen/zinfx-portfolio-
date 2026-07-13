@@ -1,0 +1,493 @@
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { 
+  collection, 
+  doc, 
+  onSnapshot, 
+  getDocs, 
+  setDoc, 
+  deleteDoc, 
+  writeBatch 
+} from 'firebase/firestore';
+import { db } from '../lib/firebase';
+import { PortfolioItem, Service, Testimonial, SocialLink, TaxonomyConfig } from '../types';
+import { 
+  services as defaultServices, 
+  testimonials as defaultTestimonials, 
+  socialLinks as defaultSocialLinks 
+} from '../data';
+
+export interface SiteConfig {
+  hero: {
+    titleLine1: string;
+    gradientWord: string;
+    italicWord: string;
+    subtitle: string;
+    imageUrl: string;
+    designerName: string;
+    designerStatus: string;
+    designerSubtext: string;
+  };
+  about: {
+    badgeText: string;
+    titleLine1: string;
+    titleLine2: string;
+    portraitUrl: string;
+    paragraph1: string;
+    paragraph2: string;
+    craftQualityLabel: string;
+    craftQualityValue: string;
+    experienceValue: string;
+    experienceLabel: string;
+    specialties: string[];
+  };
+  servicesTitle: {
+    badgeText: string;
+    titleText: string;
+  };
+  portfolioTitle: {
+    badgeText: string;
+    titleText: string;
+  };
+  testimonialsTitle: {
+    badgeText: string;
+    titleText: string;
+  };
+  contactInfo: {
+    badgeText: string;
+    titleText: string;
+    directContactTitle: string;
+    directContactDesc: string;
+    freelanceHubsTitle: string;
+    briefFormTitle: string;
+    briefFormDesc: string;
+    emailAddress: string;
+    whatsappNumber: string;
+    whatsappText: string;
+    fiverrUrl: string;
+    behanceUrl: string;
+  };
+  logo: {
+    letters: string;
+    fullName: string;
+  };
+  seo: {
+    title: string;
+    description: string;
+    keywords: string;
+    faviconUrl: string;
+  };
+  cloudinary?: {
+    cloudName?: string;
+    uploadPreset?: string;
+  };
+}
+
+const defaultSiteConfig: SiteConfig = {
+  hero: {
+    titleLine1: "ZinFX",
+    gradientWord: "Creative",
+    italicWord: "Studio",
+    subtitle: "Handcrafting conversion-focused YouTube thumbnails, premium social media layouts, and high-energy custom graphics that command absolute attention.",
+    imageUrl: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=800&auto=format&fit=crop",
+    designerName: "ZinFX Creative Studio",
+    designerStatus: "Available",
+    designerSubtext: "Professional Graphic Designer & Thumbnail Artist"
+  },
+  about: {
+    badgeText: "ABOUT THE DESIGNER",
+    titleLine1: "Amjad Hossain",
+    titleLine2: "Professional Graphic Designer & Thumbnail Artist",
+    portraitUrl: "https://res.cloudinary.com/iq8lrhir/image/upload/v1783874533/amjad.jpg_tfcxyz.jpg",
+    paragraph1: "Hi, I'm Amjad Hossain, the founder of ZinFX Creative Studio. I specialize in YouTube thumbnails, social media graphics, posters, banners, and creative visual designs. I have 1.5 years of professional experience creating high-quality designs that help creators and brands stand out.",
+    paragraph2: "",
+    craftQualityLabel: "CRAFT QUALITY",
+    craftQualityValue: "Pixel Perfect",
+    experienceValue: "1.5",
+    experienceLabel: "Years Experience",
+    specialties: [
+      'YouTube Thumbnail Design',
+      'Social Media Design',
+      'Poster Design',
+      'Banner Design',
+      'Photoshop',
+      'Canva'
+    ]
+  },
+  servicesTitle: {
+    badgeText: "WHAT I DO BEST",
+    titleText: "Professional Design Services"
+  },
+  portfolioTitle: {
+    badgeText: "CREATIVE SHOWCASE",
+    titleText: "Stunning Designs & Layouts"
+  },
+  testimonialsTitle: {
+    badgeText: "CLIENT SUCCESS STORIES",
+    titleText: "Loved By Content Creators & Brands"
+  },
+  contactInfo: {
+    badgeText: "START A PROJECT",
+    titleText: "Let's Make Something Epic",
+    directContactTitle: "Direct Contact",
+    directContactDesc: "Want to discuss pricing, custom bundles, or express delivery times? Reach out on these primary channels for a quick response.",
+    freelanceHubsTitle: "Freelance Hubs & Portfolios",
+    briefFormTitle: "Send a Project Brief",
+    briefFormDesc: "Fill out this simple design intake form to share your specific needs. I will review and reply within 24 hours.",
+    emailAddress: "amzadhossen044@gmail.com",
+    whatsappNumber: "8801619142076",
+    whatsappText: "Instant Chat",
+    fiverrUrl: "https://www.fiverr.com/ah_amzad",
+    behanceUrl: "https://www.behance.net/amzadhossen7"
+  },
+  logo: {
+    letters: "Z",
+    fullName: "ZinFX"
+  },
+  seo: {
+    title: "ZinFX Portfolio | Premium Graphic Designer",
+    description: "Premium dark-themed portfolio for ZinFX, a professional graphic designer specializing in YouTube thumbnails, banners, posters, branding, and social media design.",
+    keywords: "ZinFX, graphic design, portfolio, thumbnails, youtube banners, esports logo, photo manipulation, posters",
+    faviconUrl: ""
+  },
+  cloudinary: {
+    cloudName: "iq8lrhir",
+    uploadPreset: "ZinFX0"
+  }
+};
+
+interface DataContextType {
+  portfolioItems: PortfolioItem[];
+  services: Service[];
+  testimonials: Testimonial[];
+  socialLinks: SocialLink[];
+  siteConfig: SiteConfig;
+  taxonomies: TaxonomyConfig;
+  loading: boolean;
+  savePortfolioItem: (item: PortfolioItem) => Promise<void>;
+  deletePortfolioItem: (id: string) => Promise<void>;
+  saveService: (item: Service) => Promise<void>;
+  deleteService: (id: string) => Promise<void>;
+  saveTestimonial: (item: Testimonial) => Promise<void>;
+  deleteTestimonial: (id: string) => Promise<void>;
+  saveSocialLinks: (links: SocialLink[]) => Promise<void>;
+  updateSiteConfig: (config: Partial<SiteConfig>) => Promise<void>;
+  updateTaxonomies: (config: TaxonomyConfig) => Promise<void>;
+  addPortfolioItem: (item: PortfolioItem) => Promise<void>;
+  updatePortfolioItem: (item: PortfolioItem) => Promise<void>;
+  addService: (item: Service) => Promise<void>;
+  updateService: (item: Service) => Promise<void>;
+  addTestimonial: (item: Testimonial) => Promise<void>;
+  updateTestimonial: (item: Testimonial) => Promise<void>;
+  updateSocialLinks: (links: SocialLink[]) => Promise<void>;
+}
+
+const DataContext = createContext<DataContextType | undefined>(undefined);
+
+export const defaultTaxonomies: TaxonomyConfig = {
+  categories: [
+    { id: 'thumbnails', label: 'Thumbnails' },
+    { id: 'social_media', label: 'Social Media' },
+    { id: 'posters', label: 'Posters' },
+    { id: 'branding', label: 'Branding' },
+    { id: 'banners', label: 'Banners' },
+    { id: 'photo_editing', label: 'Photo Editing' },
+    { id: 'other', label: 'Other' }
+  ],
+  platforms: ['YouTube', 'Instagram', 'TikTok', 'LinkedIn', 'Website', 'Other'],
+  software: ['Adobe Photoshop', 'Adobe Illustrator', 'Adobe Premiere Pro', 'Adobe After Effects', 'Canva', 'Figma', 'CapCut', 'Other']
+};
+
+export function DataProvider({ children }: { children: React.ReactNode }) {
+  const [portfolioItems, setPortfolioItems] = useState<PortfolioItem[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
+  const [testimonials, setTestimonials] = useState<Testimonial[]>([]);
+  const [socialLinks, setSocialLinks] = useState<SocialLink[]>([]);
+  const [siteConfig, setSiteConfig] = useState<SiteConfig>(defaultSiteConfig);
+  const [taxonomies, setTaxonomies] = useState<TaxonomyConfig>(defaultTaxonomies);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  // Monitor SEO and Favicon dynamically
+  useEffect(() => {
+    if (siteConfig?.seo) {
+      document.title = siteConfig.seo.title || "ZinFX Portfolio";
+      
+      // Meta Description
+      let metaDesc = document.querySelector('meta[name="description"]');
+      if (!metaDesc) {
+        metaDesc = document.createElement('meta');
+        metaDesc.setAttribute('name', 'description');
+        document.head.appendChild(metaDesc);
+      }
+      metaDesc.setAttribute('content', siteConfig.seo.description || "");
+
+      // Meta Keywords
+      let metaKeywords = document.querySelector('meta[name="keywords"]');
+      if (!metaKeywords) {
+        metaKeywords = document.createElement('meta');
+        metaKeywords.setAttribute('name', 'keywords');
+        document.head.appendChild(metaKeywords);
+      }
+      metaKeywords.setAttribute('content', siteConfig.seo.keywords || "");
+
+      // Favicon
+      if (siteConfig.seo.faviconUrl) {
+        let faviconLink = document.querySelector('link[rel="icon"]');
+        if (!faviconLink) {
+          faviconLink = document.createElement('link');
+          faviconLink.setAttribute('rel', 'icon');
+          document.head.appendChild(faviconLink);
+        }
+        faviconLink.setAttribute('href', siteConfig.seo.faviconUrl);
+      }
+    }
+  }, [siteConfig]);
+
+  useEffect(() => {
+    // 1. Listen to Portfolio
+    const unsubPortfolio = onSnapshot(collection(db, 'portfolio'), (snapshot) => {
+      const items: PortfolioItem[] = [];
+      snapshot.forEach((doc) => {
+        items.push({ id: doc.id, ...doc.data() } as PortfolioItem);
+      });
+      // Sort: Featured first, then displayOrder ascending
+      items.sort((a, b) => {
+        const aFeatured = !!a.isFeatured;
+        const bFeatured = !!b.isFeatured;
+        if (aFeatured !== bFeatured) {
+          return aFeatured ? -1 : 1;
+        }
+        const aOrder = a.displayOrder !== undefined ? a.displayOrder : 999999;
+        const bOrder = b.displayOrder !== undefined ? b.displayOrder : 999999;
+        if (aOrder !== bOrder) {
+          return aOrder - bOrder;
+        }
+        return a.id.localeCompare(b.id);
+      });
+      setPortfolioItems(items);
+    });
+
+    // 2. Listen to Services
+    const unsubServices = onSnapshot(collection(db, 'services'), (snapshot) => {
+      const items: Service[] = [];
+      snapshot.forEach((doc) => {
+        items.push({ id: doc.id, ...doc.data() } as Service);
+      });
+      setServices(items);
+    });
+
+    // 3. Listen to Testimonials
+    const unsubTestimonials = onSnapshot(collection(db, 'testimonials'), (snapshot) => {
+      const items: Testimonial[] = [];
+      snapshot.forEach((doc) => {
+        items.push({ id: doc.id, ...doc.data() } as Testimonial);
+      });
+      setTestimonials(items);
+    });
+
+    // 4. Listen to Social Links
+    const unsubSocialLinks = onSnapshot(doc(db, 'config', 'socials'), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        if (data && Array.isArray(data.links)) {
+          setSocialLinks(data.links);
+        }
+      }
+    });
+
+    // 5. Listen to Site Settings Config
+    const unsubSiteConfig = onSnapshot(doc(db, 'config', 'site'), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setSiteConfig((prev) => ({
+          ...prev,
+          ...data
+        }) as SiteConfig);
+      }
+    });
+
+    // 6. Listen to Taxonomies Config (Categories, Platforms, Software)
+    const unsubTaxonomies = onSnapshot(doc(db, 'config', 'taxonomies'), (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setTaxonomies((prev) => ({
+          ...prev,
+          ...data
+        }) as TaxonomyConfig);
+      }
+    });
+
+    // Seed checking & Initial loading completion
+    const checkAndSeed = async () => {
+      try {
+        const batch = writeBatch(db);
+        let needsCommit = false;
+
+        // Check and Seed Services
+        const servicesSnapshot = await getDocs(collection(db, 'services'));
+        if (servicesSnapshot.empty) {
+          console.log("Seeding default services...");
+          defaultServices.forEach((service) => {
+            const docRef = doc(collection(db, 'services'), service.id);
+            batch.set(docRef, service);
+          });
+          needsCommit = true;
+        }
+
+        // Check and Seed Testimonials
+        const testimonialsSnapshot = await getDocs(collection(db, 'testimonials'));
+        if (testimonialsSnapshot.empty) {
+          console.log("Seeding default testimonials...");
+          defaultTestimonials.forEach((test) => {
+            const docRef = doc(collection(db, 'testimonials'), test.id);
+            batch.set(docRef, test);
+          });
+          needsCommit = true;
+        }
+
+        // Check and Seed Social Links & Site Config & Taxonomies
+        const socialsSnapshot = await getDocs(collection(db, 'config'));
+        if (socialsSnapshot.empty) {
+          console.log("Seeding default configurations...");
+          const socialsRef = doc(db, 'config', 'socials');
+          batch.set(socialsRef, { links: defaultSocialLinks });
+
+          const siteConfigRef = doc(db, 'config', 'site');
+          batch.set(siteConfigRef, defaultSiteConfig);
+
+          const taxonomiesRef = doc(db, 'config', 'taxonomies');
+          batch.set(taxonomiesRef, defaultTaxonomies);
+
+          needsCommit = true;
+        } else {
+          // If the config collection is not empty, but taxonomies document is missing, seed it individually
+          const configSnapshot = await getDocs(collection(db, 'config'));
+          const hasTaxonomies = configSnapshot.docs.some(doc => doc.id === 'taxonomies');
+          if (!hasTaxonomies) {
+            console.log("Taxonomies doc missing. Seeding default taxonomies...");
+            const taxonomiesRef = doc(db, 'config', 'taxonomies');
+            await setDoc(taxonomiesRef, defaultTaxonomies);
+          }
+
+          // Force migrate site configuration if it still contains old placeholder/unrequested content
+          const siteDoc = configSnapshot.docs.find(doc => doc.id === 'site');
+          if (siteDoc) {
+            const data = siteDoc.data();
+            if (
+              data.about?.titleLine1 === "Transforming Ideas Into" ||
+              data.about?.experienceValue === "5+" ||
+              data.hero?.designerName === "ZinFX Graphics" ||
+              data.contactInfo?.emailAddress === "contact.zinfx@gmail.com" ||
+              data.contactInfo?.whatsappNumber === "1234567890" ||
+              data.contactInfo?.fiverrUrl === "https://fiverr.com/zinfx"
+            ) {
+              console.log("Migrating database config to remove old placeholders and update contact channels...");
+              const siteConfigRef = doc(db, 'config', 'site');
+              await setDoc(siteConfigRef, defaultSiteConfig);
+
+              const socialsRef = doc(db, 'config', 'socials');
+              await setDoc(socialsRef, { links: defaultSocialLinks });
+            }
+          }
+        }
+
+        if (needsCommit) {
+          await batch.commit();
+          console.log("Configurations successfully seeded!");
+        }
+      } catch (err) {
+        console.error("Error during checking/seeding Firestore:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    checkAndSeed();
+
+    return () => {
+      unsubPortfolio();
+      unsubServices();
+      unsubTestimonials();
+      unsubSocialLinks();
+      unsubSiteConfig();
+      unsubTaxonomies();
+    };
+  }, []);
+
+  const savePortfolioItem = async (item: PortfolioItem) => {
+    await setDoc(doc(db, 'portfolio', item.id), item);
+  };
+
+  const deletePortfolioItem = async (id: string) => {
+    await deleteDoc(doc(db, 'portfolio', id));
+  };
+
+  const saveService = async (item: Service) => {
+    await setDoc(doc(db, 'services', item.id), item);
+  };
+
+  const deleteService = async (id: string) => {
+    await deleteDoc(doc(db, 'services', id));
+  };
+
+  const saveTestimonial = async (item: Testimonial) => {
+    await setDoc(doc(db, 'testimonials', item.id), item);
+  };
+
+  const deleteTestimonial = async (id: string) => {
+    await deleteDoc(doc(db, 'testimonials', id));
+  };
+
+  const saveSocialLinks = async (links: SocialLink[]) => {
+    await setDoc(doc(db, 'config', 'socials'), { links });
+  };
+
+  const updateSiteConfig = async (config: Partial<SiteConfig>) => {
+    const updated = {
+      ...siteConfig,
+      ...config
+    };
+    await setDoc(doc(db, 'config', 'site'), updated);
+  };
+
+  const updateTaxonomies = async (config: TaxonomyConfig) => {
+    await setDoc(doc(db, 'config', 'taxonomies'), config);
+  };
+
+  return (
+    <DataContext.Provider value={{
+      portfolioItems,
+      services,
+      testimonials,
+      socialLinks: socialLinks.length > 0 ? socialLinks : defaultSocialLinks,
+      siteConfig,
+      taxonomies,
+      loading,
+      savePortfolioItem,
+      deletePortfolioItem,
+      saveService,
+      deleteService,
+      saveTestimonial,
+      deleteTestimonial,
+      saveSocialLinks,
+      updateSiteConfig,
+      updateTaxonomies,
+      addPortfolioItem: savePortfolioItem,
+      updatePortfolioItem: savePortfolioItem,
+      addService: saveService,
+      updateService: saveService,
+      addTestimonial: saveTestimonial,
+      updateTestimonial: saveTestimonial,
+      updateSocialLinks: saveSocialLinks
+    }}>
+      {children}
+    </DataContext.Provider>
+  );
+}
+
+export function useData() {
+  const context = useContext(DataContext);
+  if (context === undefined) {
+    throw new Error('useData must be used within a DataProvider');
+  }
+  return context;
+}
